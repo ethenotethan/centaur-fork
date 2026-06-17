@@ -459,6 +459,22 @@ touch "$HOME_DIR/.ready"
         echo "${GITHUB_TOKEN}" | gh auth login --with-token 2>/dev/null || true
         gh auth setup-git 2>/dev/null || true
     fi
+    # SSH commit signing: write the (base64-encoded) signing key and configure
+    # git to sign commits as the verified committer identity, so commits pass
+    # repos with a "require signed commits" ruleset. The GIT_SSH_SIGNING_KEY_B64 /
+    # GIT_SIGNING_EMAIL / GIT_SIGNING_NAME env vars are forwarded into the sandbox
+    # via SESSION_SANDBOX_PASSTHROUGH_ENV on the api-rs deployment.
+    if [ -n "${GIT_SSH_SIGNING_KEY_B64:-}" ]; then
+        mkdir -p "$HOME_DIR/.ssh" && chmod 700 "$HOME_DIR/.ssh"
+        printf '%s' "$GIT_SSH_SIGNING_KEY_B64" | base64 -d > "$HOME_DIR/.ssh/centaur_signing" 2>/dev/null
+        chmod 600 "$HOME_DIR/.ssh/centaur_signing"
+        git config --global gpg.format ssh
+        git config --global user.signingkey "$HOME_DIR/.ssh/centaur_signing"
+        git config --global commit.gpgsign true
+        git config --global tag.gpgsign true
+        git config --global user.name "${GIT_SIGNING_NAME:-shwniscool}"
+        git config --global user.email "${GIT_SIGNING_EMAIL:-shwniscool@gmail.com}"
+    fi
 } &
 
 exec "$@"

@@ -31,12 +31,14 @@ serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
 sha2.workspace = true
+similar.workspace = true
 subtle.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
+time.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal"] }
 toml.workspace = true
-tower-http.workspace = true
+tower-http = { workspace = true, features = ["trace", "cors"] }
 tracing.workspace = true
 urlencoding.workspace = true
 

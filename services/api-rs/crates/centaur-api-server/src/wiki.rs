@@ -403,11 +403,18 @@ async fn wiki_changes(
     }
 
     // The sources table may not exist before first ingest — swallow errors.
+    // Query by EVENT time (occurred_at) — when the source actually happened
+    // in the world — falling back to ingested_at for any older row missing
+    // event time. "What changed in the window June 10-12" should return PRs
+    // merged / Linear updated / Slack threads from that window even if they
+    // were backfilled into the wiki today. Same shape as /wiki/timeline.
     let mut sources: Vec<Value> = Vec::new();
     let mut src_by_kind: BTreeMap<String, i64> = BTreeMap::new();
     let src_rows = sqlx::query(
-        "SELECT source_key, kind, ingested_at FROM wiki_ingested_sources \
-         WHERE ingested_at >= $1 AND ingested_at < $2 ORDER BY ingested_at DESC",
+        "SELECT source_key, kind, ingested_at, occurred_at FROM wiki_ingested_sources \
+         WHERE COALESCE(occurred_at, ingested_at) >= $1 \
+           AND COALESCE(occurred_at, ingested_at) < $2 \
+         ORDER BY COALESCE(occurred_at, ingested_at) DESC",
     )
     .bind(start)
     .bind(end)
@@ -417,6 +424,7 @@ async fn wiki_changes(
         for r in &src_rows {
             let source_key: String = r.try_get("source_key").unwrap_or_default();
             let ingested_at: Option<OffsetDateTime> = r.try_get("ingested_at").ok();
+            let occurred_at: Option<OffsetDateTime> = r.try_get("occurred_at").ok().flatten();
             let mut disp = source_display(&source_key);
             let kind = disp
                 .get("kind")
@@ -424,6 +432,9 @@ async fn wiki_changes(
                 .unwrap_or("other")
                 .to_owned();
             *src_by_kind.entry(kind).or_insert(0) += 1;
+            // Expose both: occurred_at (the meaningful date for "what happened
+            // when") and ingested_at (pipeline-debug overlay).
+            disp.insert("occurred_at".into(), json!(iso(occurred_at)));
             disp.insert("ingested_at".into(), json!(iso(ingested_at)));
             sources.push(Value::Object(disp));
         }

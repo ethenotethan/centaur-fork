@@ -166,6 +166,21 @@ fn source_display(source_key: &str) -> Map<String, Value> {
         m.insert("url".into(), json!(""));
         return m;
     }
+    if let Some(rest) = source_key.strip_prefix("slack:") {
+        // Slack source_key is `slack:<document_id>` where document_id encodes
+        // the thread/digest. Surface a readable label and keep `kind` accurate
+        // so callers (and the agent narrative) don't see "other".
+        m.insert("kind".into(), json!("slack"));
+        m.insert("label".into(), json!(rest));
+        m.insert("url".into(), json!(""));
+        return m;
+    }
+    if let Some(rest) = source_key.strip_prefix("doc:") {
+        m.insert("kind".into(), json!("doc"));
+        m.insert("label".into(), json!(rest));
+        m.insert("url".into(), json!(""));
+        return m;
+    }
     m.insert("kind".into(), json!("other"));
     m.insert("label".into(), json!(source_key));
     m.insert("url".into(), json!(""));

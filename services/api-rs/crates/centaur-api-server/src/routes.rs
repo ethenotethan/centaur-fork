@@ -95,7 +95,7 @@ impl AppState {
         self.initialized().is_some()
     }
 
-    fn runtime(&self) -> Result<SessionRuntime, ApiError> {
+    pub(crate) fn runtime(&self) -> Result<SessionRuntime, ApiError> {
         self.initialized()
             .map(|initialized| initialized.runtime)
             .ok_or_else(|| ApiError::ServiceUnavailable("api-rs is still starting".to_owned()))

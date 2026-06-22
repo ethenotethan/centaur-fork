@@ -108,42 +108,6 @@ class WorkflowContext:
             }
         )
 
-    async def sleep(self, name: str, duration: Any) -> None:
-        if hasattr(duration, "total_seconds"):
-            seconds = duration.total_seconds()
-        else:
-            seconds = float(duration)
-        await self._rpc.request({"type": "ctx.sleep", "step": name, "seconds": seconds})
-        return None
-
-    async def sleep_until(self, name: str, when: Any) -> None:
-        if hasattr(when, "isoformat"):
-            iso = when.isoformat()
-        else:
-            iso = str(when)
-        await self._rpc.request({"type": "ctx.sleep_until", "step": name, "when": iso})
-        return None
-
-    async def start_workflow(
-        self,
-        name: str,
-        *,
-        workflow_name: str,
-        run_input: dict[str, Any] | None = None,
-        trigger_key: str | None = None,
-        **kwargs: Any,
-    ) -> Any:
-        del kwargs
-        return await self._rpc.request(
-            {
-                "type": "ctx.start_workflow",
-                "step": name,
-                "workflow_name": workflow_name,
-                "run_input": run_input or {},
-                "trigger_key": trigger_key,
-            }
-        )
-
 
 class RpcClient:
     def __init__(self) -> None:

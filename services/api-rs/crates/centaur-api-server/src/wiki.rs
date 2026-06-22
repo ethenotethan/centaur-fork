@@ -66,8 +66,8 @@ fn parse_cors_origins() -> Option<Vec<HeaderValue>> {
     )
 }
 
-fn pool(state: &AppState) -> &PgPool {
-    state.runtime().store().pool()
+fn pool(state: &AppState) -> Result<&PgPool, ApiError> {
+    Ok(state.runtime()?.store().pool())
 }
 
 /// Format an optional timestamp as ISO-8601 (RFC 3339), or `""` if absent —
@@ -208,7 +208,7 @@ async fn wiki_graph(State(state): State<AppState>) -> Result<Json<Value>, ApiErr
          ORDER BY title",
     )
     .bind(&PAGE_TYPES[..])
-    .fetch_all(pool(&state))
+    .fetch_all(pool(&state)?)
     .await?;
 
     let pages: Vec<PageRow> = rows
@@ -324,7 +324,7 @@ async fn wiki_page(state: &AppState, document_id: &str) -> Result<Json<Value>, A
          FROM company_context_documents WHERE document_id = $1 AND source = 'wiki'",
     )
     .bind(document_id)
-    .fetch_optional(pool(state))
+    .fetch_optional(pool(state)?)
     .await?;
 
     let Some(row) = row else {
@@ -351,7 +351,7 @@ async fn wiki_revisions(state: &AppState, document_id: &str) -> Result<Json<Valu
          WHERE document_id = $1 ORDER BY revised_at DESC LIMIT 200",
     )
     .bind(document_id)
-    .fetch_all(pool(state))
+    .fetch_all(pool(state)?)
     .await;
 
     let rows = match rows {
@@ -398,7 +398,7 @@ async fn wiki_changes(
     .bind(&PAGE_TYPES[..])
     .bind(start)
     .bind(end)
-    .fetch_all(pool(&state))
+    .fetch_all(pool(&state)?)
     .await?;
 
     let mut pages: Vec<Value> = Vec::with_capacity(page_rows.len());
@@ -433,7 +433,7 @@ async fn wiki_changes(
     )
     .bind(start)
     .bind(end)
-    .fetch_all(pool(&state))
+    .fetch_all(pool(&state)?)
     .await;
     if let Ok(src_rows) = src_rows {
         for r in &src_rows {
@@ -495,7 +495,7 @@ async fn wiki_timeline(
     )
     .bind(start)
     .bind(end)
-    .fetch_all(pool(&state))
+    .fetch_all(pool(&state)?)
     .await;
 
     if let Ok(rows) = rows {
@@ -585,7 +585,7 @@ async fn wiki_diff(
 ) -> Result<Json<Value>, ApiError> {
     let id = q.id;
     let (start, end) = window(q.days, q.since.as_deref(), q.until.as_deref());
-    let pool = pool(&state);
+    let pool = pool(&state)?;
 
     let page = sqlx::query(
         "SELECT title FROM company_context_documents WHERE document_id = $1 AND source = 'wiki'",

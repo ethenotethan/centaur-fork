@@ -37,6 +37,7 @@ use futures_util::{Stream, StreamExt};
 use hmac::{Hmac, Mac};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use sqlx::PgPool;
 use tower_http::trace::TraceLayer;
 use tracing::Span;
 
@@ -45,7 +46,8 @@ use crate::{
     types::{
         AppendMessagesRequest, AppendMessagesResponse, CreateSessionRequest, CreateSessionResponse,
         EmitWorkflowEventRequest, EventsQuery, ExecuteSessionRequest, ExecuteSessionResponse,
-        ListWorkflowRunsQuery, OnHarnessConflict, SessionSseEvent, stream_error_sse,
+        ListWorkflowRunsQuery, OnHarnessConflict, SessionContextResponse, SessionSseEvent,
+        SlackThreadContext, stream_error_sse,
     },
     wiki,
 };
@@ -54,12 +56,14 @@ use crate::{
 pub struct AppState {
     initialized: Arc<RwLock<Option<AppRuntimeState>>>,
     metrics: PrometheusHandle,
+    pool: Arc<RwLock<Option<PgPool>>>,
 }
 
 #[derive(Clone)]
 struct AppRuntimeState {
     runtime: SessionRuntime,
     workflows: Option<WorkflowRuntime>,
+    pool: PgPool,
 }
 
 impl AppState {
@@ -67,21 +71,44 @@ impl AppState {
         Self {
             initialized: Arc::new(RwLock::new(None)),
             metrics: prometheus_handle().expect("failed to initialize Prometheus metrics recorder"),
+            pool: Arc::new(RwLock::new(None)),
         }
     }
 
-    pub fn ready(runtime: SessionRuntime, workflows: Option<WorkflowRuntime>) -> Self {
+    pub fn ready(
+        runtime: SessionRuntime,
+        workflows: Option<WorkflowRuntime>,
+        pool: PgPool,
+    ) -> Self {
         let state = Self::unready();
-        state.mark_ready(runtime, workflows);
+        state.mark_ready(runtime, workflows, pool);
         state
     }
 
-    pub fn mark_ready(&self, runtime: SessionRuntime, workflows: Option<WorkflowRuntime>) {
-        let mut initialized = self
-            .initialized
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *initialized = Some(AppRuntimeState { runtime, workflows });
+    pub fn mark_ready(
+        &self,
+        runtime: SessionRuntime,
+        workflows: Option<WorkflowRuntime>,
+        pool: PgPool,
+    ) {
+        {
+            let mut initialized = self
+                .initialized
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *initialized = Some(AppRuntimeState {
+                runtime,
+                workflows,
+                pool: pool.clone(),
+            });
+        }
+        {
+            let mut pool_lock = self
+                .pool
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *pool_lock = Some(pool);
+        }
     }
 
     fn initialized(&self) -> Option<AppRuntimeState> {
@@ -98,6 +125,14 @@ impl AppState {
     pub(crate) fn runtime(&self) -> Result<SessionRuntime, ApiError> {
         self.initialized()
             .map(|initialized| initialized.runtime)
+            .ok_or_else(|| ApiError::ServiceUnavailable("api-rs is still starting".to_owned()))
+    }
+
+    pub(crate) fn pool(&self) -> Result<PgPool, ApiError> {
+        self.pool
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
             .ok_or_else(|| ApiError::ServiceUnavailable("api-rs is still starting".to_owned()))
     }
 
@@ -129,14 +164,16 @@ pub fn build_router_with_runtime(store: PgSessionStore, sandbox_runtime: Sandbox
 }
 
 pub fn build_router_with_session_runtime(runtime: SessionRuntime) -> Router {
-    build_router_with_session_and_workflow_runtime(runtime, None)
+    let pool = runtime.store().pool().clone();
+    build_router_with_session_and_workflow_runtime(runtime, None, pool)
 }
 
 pub fn build_router_with_session_and_workflow_runtime(
     runtime: SessionRuntime,
     workflows: Option<WorkflowRuntime>,
+    pool: PgPool,
 ) -> Router {
-    build_router_with_app_state(AppState::ready(runtime, workflows))
+    build_router_with_app_state(AppState::ready(runtime, workflows, pool))
 }
 
 pub fn build_router_with_app_state(state: AppState) -> Router {

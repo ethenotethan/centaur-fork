@@ -80,6 +80,7 @@ async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), Serve
     let workflow_host_sandbox = args
         .workflow_host_sandbox_runtime(workflow_host_principal.as_deref())
         .await?;
+    let pool = store.pool().clone();
     let workflows = Some(
         WorkflowRuntime::new_with_workflow_host_sandbox(
             store,
@@ -97,7 +98,7 @@ async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), Serve
         adoption_runtime.adopt_orphaned_executions().await;
     });
 
-    app_state.mark_ready(runtime, workflows);
+    app_state.mark_ready(runtime, workflows, pool);
     info!("centaur api-rs runtime initialized");
     Ok(())
 }

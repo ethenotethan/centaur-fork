@@ -2,13 +2,22 @@ from __future__ import annotations
 
 from typing import Any
 
-from workflows.gsuite.http import build_http
+from workflows.gsuite.http import build_credentials, build_http
 
 
 def get_docs_service():
-    """Return a proxy-authenticated Google Docs v1 service."""
+    """Return a Google Docs v1 service.
+
+    DARKBLOOM PATCH: when SA credentials are available (our sandbox entrypoint
+    writes the real key to GOOGLE_APPLICATION_CREDENTIALS), authenticate
+    directly and bypass iron-proxy. Falls back to upstream's proxy-injection
+    model when there are no real creds (no GOOGLE_SA_KEY in env, mock ADC).
+    """
     from googleapiclient.discovery import build
 
+    credentials = build_credentials()
+    if credentials is not None:
+        return build("docs", "v1", credentials=credentials, http=build_http("www.googleapis.com"))
     return build("docs", "v1", http=build_http())
 
 

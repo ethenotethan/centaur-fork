@@ -73,16 +73,45 @@ EOF
 # ── Mock Google ADC for sandbox-only SDK initialization ─────────────────────
 # Some Google client libraries refuse to initialize without ADC, even when the
 # per-sandbox proxy is responsible for attaching the real auth headers.
+#
+# DARKBLOOM PATCH: if GOOGLE_SA_KEY is present in the env (our deployment ships
+# the real SA JSON inline as an env var), materialize it as the ADC file instead
+# of generating a mock. Without this the Drive/Calendar ETL workflows make
+# unauthenticated calls and Google rejects with 403 "unregistered callers"
+# because iron-proxy doesn't have a Google-SA-to-Bearer transform — only a
+# query-param GOOGLE_API_KEY injection that Drive doesn't accept.
+#
+# Also add googleapis.com hosts to NO_PROXY so the workflow's google-api-python
+# client talks directly to Google with its own OAuth flow, bypassing iron-proxy.
+# This mirrors the bypass the old Python stack had in k8s/centaur/values.yaml
+# (no_proxy="…oauth2.googleapis.com,www.googleapis.com,docs.googleapis.com")
+# that was dropped during the Rust cutover.
 if [ -z "${GOOGLE_APPLICATION_CREDENTIALS:-}" ]; then
     GOOGLE_APPLICATION_CREDENTIALS="$HOME_DIR/.config/gcloud/application_default_credentials.json"
     export GOOGLE_APPLICATION_CREDENTIALS
     mkdir -p "$(dirname "$GOOGLE_APPLICATION_CREDENTIALS")"
     if [ ! -f "$GOOGLE_APPLICATION_CREDENTIALS" ]; then
-        # Some SDKs parse ADC into service-account credentials locally before any
-        # outbound request reaches the proxy, so the stub must look real enough
-        # to pass key loading.
-        _mock_gcp_private_key="$(openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 2>/dev/null)"
-        MOCK_GCP_PRIVATE_KEY="$_mock_gcp_private_key" python3 - "$GOOGLE_APPLICATION_CREDENTIALS" <<'PYEOF'
+        if [ -n "${GOOGLE_SA_KEY:-}" ]; then
+            # Use python to write the env var → file, since bash heredoc would
+            # mangle the embedded newlines inside the SA's private_key field.
+            python3 - "$GOOGLE_APPLICATION_CREDENTIALS" <<'PYEOF'
+import json, os, sys
+path = sys.argv[1]
+raw = os.environ["GOOGLE_SA_KEY"]
+parsed = json.loads(raw)  # validates shape; fails loudly if env is malformed
+with open(path, "w") as f:
+    json.dump(parsed, f, indent=2)
+    f.write("\n")
+os.chmod(path, 0o600)
+PYEOF
+            export NO_PROXY="${NO_PROXY:+${NO_PROXY},}oauth2.googleapis.com,www.googleapis.com,docs.googleapis.com,drive.googleapis.com,sheets.googleapis.com,calendar-json.googleapis.com"
+            export no_proxy="${NO_PROXY}"
+        else
+            # Some SDKs parse ADC into service-account credentials locally before any
+            # outbound request reaches the proxy, so the stub must look real enough
+            # to pass key loading.
+            _mock_gcp_private_key="$(openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 2>/dev/null)"
+            MOCK_GCP_PRIVATE_KEY="$_mock_gcp_private_key" python3 - "$GOOGLE_APPLICATION_CREDENTIALS" <<'PYEOF'
 import json
 import os
 import sys
@@ -110,7 +139,8 @@ with open(path, "w") as f:
     )
     f.write("\n")
 PYEOF
-        unset _mock_gcp_private_key
+            unset _mock_gcp_private_key
+        fi
     fi
 fi
 

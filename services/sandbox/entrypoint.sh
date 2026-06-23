@@ -5,6 +5,36 @@ HOME_DIR="$(eval echo ~)"
 FIREWALL_HOSTNAME="${FIREWALL_HOST:-firewall}"
 STATE_DIR="${CENTAUR_STATE_DIR:-$HOME_DIR/state}"
 
+# DARKBLOOM PATCH: wait for iron-proxy's tunnel port to accept TCP before any
+# user code runs. The proxy pod and the sandbox pod are spawned in parallel by
+# api-rs, and the sandbox container can hit its first outbound call before the
+# proxy's listeners (:8080 tunnel, :53 DNS) are accepting. Symptom: the very
+# first slack_sdk / google-api / anthropic call fails with
+# `ConnectionRefusedError: [Errno 111] Connection refused`, which slack_sdk
+# wraps as `Slack API error: unknown_error` — and then asyncio gets stuck for
+# 300+ seconds because the executor thread can't join cleanly. The workflow
+# host marks the absurd task `failed` only after the executor finally exits,
+# leaving the task `running` and the slack_live queue (concurrency=1) blocked
+# for hours.
+#
+# Sleep-and-poll with a hard cap so a real misconfiguration doesn't deadlock
+# startup. 15s is plenty: iron-proxy's tunnel listener was up ~74ms after
+# `starting in managed mode` in our deployment, so a single sleep would be
+# enough in practice; the loop covers the cold-start case where the proxy is
+# still loading config from iron-control.
+if [ -n "${FIREWALL_HOST:-}" ] && [ "${FIREWALL_HOST}" != "firewall" ]; then
+    for i in $(seq 1 30); do
+        if timeout 1 bash -c "</dev/tcp/${FIREWALL_HOST}/${FIREWALL_PROXY_PORT:-8080}" 2>/dev/null; then
+            break
+        fi
+        if [ "$i" -eq 30 ]; then
+            echo "WARN: iron-proxy ${FIREWALL_HOST}:${FIREWALL_PROXY_PORT:-8080} not accepting after 15s; continuing anyway" >&2
+            break
+        fi
+        sleep 0.5
+    done
+fi
+
 append_tool_dirs() {
     if [ -z "${1:-}" ]; then
         return

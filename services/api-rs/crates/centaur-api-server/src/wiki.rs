@@ -181,6 +181,24 @@ fn source_display(source_key: &str) -> Map<String, Value> {
         m.insert("url".into(), json!(""));
         return m;
     }
+    if let Some(rest) = source_key.strip_prefix("release:") {
+        // release:<repo>@<tag>  → label is "<repo> <tag>" + GitHub release URL.
+        let (repo, tag) = match rest.split_once('@') {
+            Some((repo, tag)) => (repo, tag),
+            None => (rest, ""),
+        };
+        m.insert("kind".into(), json!("release"));
+        m.insert("label".into(), json!(format!("{repo} {tag}")));
+        m.insert(
+            "url".into(),
+            json!(if tag.is_empty() {
+                String::new()
+            } else {
+                format!("https://github.com/{repo}/releases/tag/{tag}")
+            }),
+        );
+        return m;
+    }
     if let Some(rest) = source_key.strip_prefix("directive:") {
         // directive:<slack_user_id>:<message_ts> — label is just the actor for
         // a minimal fallback; the timeline endpoint LEFT JOINs wiki_directives

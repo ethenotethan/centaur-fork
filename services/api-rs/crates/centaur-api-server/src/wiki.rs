@@ -181,6 +181,16 @@ fn source_display(source_key: &str) -> Map<String, Value> {
         m.insert("url".into(), json!(""));
         return m;
     }
+    if let Some(rest) = source_key.strip_prefix("directive:") {
+        // directive:<slack_user_id>:<message_ts> — label is just the actor for
+        // a minimal fallback; the timeline endpoint LEFT JOINs wiki_directives
+        // and overrides label/actor/quote with the richer fields below.
+        let actor = rest.split(':').next().unwrap_or("").to_owned();
+        m.insert("kind".into(), json!("directive"));
+        m.insert("label".into(), json!(format!("directive from {actor}")));
+        m.insert("url".into(), json!(""));
+        return m;
+    }
     m.insert("kind".into(), json!("other"));
     m.insert("label".into(), json!(source_key));
     m.insert("url".into(), json!(""));
@@ -491,12 +501,22 @@ async fn wiki_timeline(
     let mut by_kind: BTreeMap<String, i64> = BTreeMap::new();
     // The table (and the occurred_at/title/url columns) may not exist before the
     // first ingest on a fresh DB — swallow errors and return an empty timeline.
+    //
+    // LEFT JOIN wiki_directives so directive rows carry the rich attribution
+    // payload (actor name + verbatim quote + target pages + status) inline.
+    // Non-directive rows get NULLs for these columns and the frontend just
+    // omits them. The COALESCEs above on (occurred_at, ingested_at) still
+    // drive the time axis.
     let rows = sqlx::query(
-        "SELECT source_key, kind, ingested_at, occurred_at, title, url \
-         FROM wiki_ingested_sources \
-         WHERE COALESCE(occurred_at, ingested_at) >= $1 \
-           AND COALESCE(occurred_at, ingested_at) < $2 \
-         ORDER BY COALESCE(occurred_at, ingested_at) DESC",
+        "SELECT s.source_key, s.kind, s.ingested_at, s.occurred_at, s.title, s.url, \
+                d.actor_slack_id, d.actor_name, d.body AS directive_body, \
+                d.target_pages, d.status AS directive_status, \
+                d.resulting_revision_ids \
+         FROM wiki_ingested_sources s \
+         LEFT JOIN wiki_directives d ON d.source_key = s.source_key \
+         WHERE COALESCE(s.occurred_at, s.ingested_at) >= $1 \
+           AND COALESCE(s.occurred_at, s.ingested_at) < $2 \
+         ORDER BY COALESCE(s.occurred_at, s.ingested_at) DESC",
     )
     .bind(start)
     .bind(end)
@@ -534,10 +554,41 @@ async fn wiki_timeline(
             };
 
             *by_kind.entry(kind.clone()).or_insert(0) += 1;
+
+            // Directive-specific enrichment from the LEFT JOIN. These are
+            // None on non-directive rows; serialized as null in JSON so the
+            // SPA can simply check `event.actor_name` etc.
+            let actor_slack_id: Option<String> = r.try_get("actor_slack_id").ok();
+            let actor_name: Option<String> = r.try_get("actor_name").ok();
+            let directive_body: Option<String> = r.try_get("directive_body").ok();
+            let target_pages: Option<Vec<String>> = r.try_get("target_pages").ok();
+            let directive_status: Option<String> = r.try_get("directive_status").ok();
+            let resulting_revision_ids: Option<Vec<i64>> =
+                r.try_get("resulting_revision_ids").ok();
+
+            // For directives, prefer the directive body as the label (verbatim
+            // quote is what you want to see on the dot), capped to a tooltip-
+            // friendly length. The full body is also exposed under
+            // `directive_body` for the popover.
+            let directive_excerpt = directive_body.as_ref().map(|b| {
+                let cleaned = b.trim();
+                if cleaned.chars().count() <= 200 {
+                    cleaned.to_owned()
+                } else {
+                    let truncated: String = cleaned.chars().take(200).collect();
+                    format!("{truncated}…")
+                }
+            });
+            let final_label = if kind == "directive" {
+                directive_excerpt.clone().unwrap_or(label)
+            } else {
+                label
+            };
+
             events.push(json!({
                 "source_key": source_key,
                 "kind": kind,
-                "label": label,
+                "label": final_label,
                 "url": url,
                 // The event-time axis: when it happened in the world.
                 "occurred_at": iso(occurred_at),
@@ -545,6 +596,16 @@ async fn wiki_timeline(
                 "ingested_at": iso(ingested_at),
                 // True when we only have ingest time (pre-column rows).
                 "event_time_estimated": occurred_at.is_none(),
+                // Directive-only enrichment (null for other kinds). The SPA
+                // tooltip uses these to render "directive from <actor>:
+                // \"<quote>\"" + chips of the target_pages.
+                "actor_slack_id": actor_slack_id,
+                "actor_name": actor_name,
+                "directive_body": directive_body,
+                "directive_excerpt": directive_excerpt,
+                "target_pages": target_pages,
+                "directive_status": directive_status,
+                "resulting_revision_ids": resulting_revision_ids,
             }));
         }
     }

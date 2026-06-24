@@ -967,6 +967,19 @@ async def main() -> int:
     completion_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
     active_workflow: asyncio.Task[dict[str, Any]] | None = None
 
+    # Watchdog: if a workflow is active AND we have outstanding RPC requests
+    # AND we haven't received ANY stdin message for this many seconds, assume
+    # the api-rs parent is gone (rollout restart, crash, dropped pipe) and
+    # exit so the orphan pod cleans up instead of sitting on a stale claim.
+    # Configurable so production can dial it up/down. Default 10 minutes — long
+    # enough for normal long synthesis calls, short enough to catch real
+    # orphans within the hourly schedule cadence.
+    _idle_secs_raw = os.environ.get("WORKFLOW_HOST_IDLE_TIMEOUT_SECS", "600")
+    try:
+        idle_timeout_secs = max(int(_idle_secs_raw), 30)
+    except ValueError:
+        idle_timeout_secs = 600
+
     async def read_stdin() -> None:
         while True:
             line = await asyncio.to_thread(sys.stdin.readline)
@@ -992,12 +1005,57 @@ async def main() -> int:
     while True:
         stdin_get = asyncio.create_task(stdin_queue.get())
         completion_get = asyncio.create_task(completion_queue.get())
-        done, pending = await asyncio.wait(
-            {stdin_get, completion_get},
-            return_when=asyncio.FIRST_COMPLETED,
-        )
+        # Bound the wait so the watchdog can fire even if neither stdin nor
+        # workflow completion ever fires. Without this, a stuck workflow that
+        # has emitted ctx.step.put but never gets a ctx.response would sleep
+        # on futex forever and the pod would never terminate.
+        timeout = idle_timeout_secs if active_workflow is not None else None
+        try:
+            done, pending = await asyncio.wait(
+                {stdin_get, completion_get},
+                return_when=asyncio.FIRST_COMPLETED,
+                timeout=timeout,
+            )
+        except asyncio.CancelledError:
+            for task in (stdin_get, completion_get):
+                task.cancel()
+            raise
         for task in pending:
             task.cancel()
+
+        if not done:
+            # Timeout fired — neither stdin nor workflow completion arrived
+            # in idle_timeout_secs while a workflow was active. Treat as
+            # parent-disconnect: cancel the active workflow and exit.
+            sys.stderr.write(
+                f"workflow_host: idle for {idle_timeout_secs}s with active workflow "
+                f"and {len(rpc._pending)} pending RPC(s); parent likely gone, aborting\n"
+            )
+            sys.stderr.flush()
+            if active_workflow is not None and not active_workflow.done():
+                active_workflow.cancel()
+                try:
+                    await asyncio.wait_for(active_workflow, timeout=5.0)
+                except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+                    pass
+            # Best-effort write of an error event so any reader still
+            # listening on stdout gets a signal, then exit.
+            try:
+                await asyncio.wait_for(
+                    rpc.write(
+                        {
+                            "type": "workflow.error",
+                            "message": (
+                                f"workflow host idle timeout after {idle_timeout_secs}s "
+                                "(parent disconnected or unresponsive)"
+                            ),
+                        }
+                    ),
+                    timeout=2.0,
+                )
+            except Exception:
+                pass
+            return 2
 
         if completion_get in done:
             active_workflow = None
@@ -1006,11 +1064,32 @@ async def main() -> int:
 
         message = stdin_get.result()
         if message is None:
+            # stdin EOF.
+            # If a workflow is still active, the parent (api-rs) is gone
+            # and we should not sit here forever. Cancel the workflow,
+            # emit a best-effort error event, and exit non-zero so the
+            # pod terminates and Kubernetes/orchestration cleans it up.
+            # Previously this branch just `continue`d, which is what
+            # caused the multi-hour orphan workflow-host pods after
+            # api-rs rollout restarts (see fix issue #49 / 2026-06-24).
             if active_workflow is not None:
-                continue
-            await asyncio.sleep(0.1)
-            asyncio.create_task(read_stdin())
-            continue
+                sys.stderr.write(
+                    "workflow_host: stdin EOF with active workflow; "
+                    "parent gone, aborting\n"
+                )
+                sys.stderr.flush()
+                if not active_workflow.done():
+                    active_workflow.cancel()
+                    try:
+                        await asyncio.wait_for(active_workflow, timeout=5.0)
+                    except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+                        pass
+                return 2
+            # No active workflow — just exit cleanly. (The original code
+            # would loop forever here because read_stdin had already
+            # exited; that's also wrong, but harmless when there's no
+            # work to lose.)
+            return 0
         message_type = message.get("type")
         try:
             if message_type == "ctx.response":

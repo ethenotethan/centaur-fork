@@ -206,6 +206,25 @@ fn source_display(source_key: &str) -> Map<String, Value> {
         );
         return m;
     }
+    if let Some(rest) = source_key.strip_prefix("tweet:") {
+        // tweet:<tweet_id> — wiki_ingested_sources.title carries "@handle PREFIX: text",
+        // but for the timeline endpoint we just give a numeric label fallback +
+        // a clickable URL. The timeline route reads .title from the DB row for
+        // the human label, so this is only the fallback if the title is empty.
+        m.insert("kind".into(), json!("tweet"));
+        m.insert("label".into(), json!(format!("tweet {rest}")));
+        m.insert(
+            "url".into(),
+            json!(if rest.is_empty() {
+                String::new()
+            } else {
+                // We don't know the handle from the source_key alone, so we
+                // use the i/web URL form which X resolves regardless of handle.
+                format!("https://x.com/i/status/{rest}")
+            }),
+        );
+        return m;
+    }
     if let Some(rest) = source_key.strip_prefix("directive:") {
         // directive:<slack_user_id>:<message_ts> — label is just the actor for
         // a minimal fallback; the timeline endpoint LEFT JOINs wiki_directives

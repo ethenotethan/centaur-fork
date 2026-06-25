@@ -24,7 +24,13 @@ WORKFLOW_NAME = "company_context_documents"
 
 DEFAULT_SYNC_INTERVAL_SECONDS = 4 * 60 * 60
 DEFAULT_WATERMARK_OVERLAP_SECONDS = 60
-MIN_THREAD_MESSAGES = 5
+# DARKBLOOM PATCH (2026-06-25): Lowered from upstream's 5 to 2. The 5-message
+# threshold (Metronome's "substantial conversation" heuristic) was hiding
+# many meaningful provider exchanges from the wiki — e.g. multi-participant
+# 4-message threads in #providers like "why isn't my machine getting jobs?"
+# with 3 replies. For our deployment those ARE the durable signals; the wiki
+# synthesis prompt downstream is responsible for discarding low-value chatter.
+MIN_THREAD_MESSAGES = 2
 FALSE_ENV_VALUES = {"0", "false", "no", "off"}
 SLACK_MENTION_RE = re.compile(r"<@([A-Z0-9]+)>")
 SLACK_CHANNEL_RE = re.compile(r"<#([A-Z0-9]+)(?:\|([^>]+))?>")

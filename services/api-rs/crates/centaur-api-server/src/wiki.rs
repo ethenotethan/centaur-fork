@@ -2,13 +2,17 @@
 //! docs-site SPA (live, from Postgres), so the frontend never relies on a
 //! committed snapshot. Public by design (a browser can't safely hold an API
 //! key); read-only, no mutations. Data: `company_context_documents` WHERE
-//! `source = 'wiki'`.
+//! `source = $WIKI_SOURCE` (defaults to `'wiki'`; set `WIKI_SOURCE=wiki_v2`
+//! to flip reads to the v2 KB — same env honored by the agent's `wiki` tool
+//! and the standup_digest workflow so a single env flip cuts every reader
+//! over at once).
 //!
 //! Ported from the original FastAPI router (`api/routers/wiki.py`). JSON field
 //! names are kept byte-for-byte identical because the docs-site SPA depends on
 //! them.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::LazyLock;
 
 use axum::{
     Json, Router,
@@ -25,6 +29,53 @@ use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use crate::{ApiError, routes::AppState};
 
 const PAGE_TYPES: [&str; 4] = ["wiki_goal", "wiki_project", "wiki_entity", "wiki_topic"];
+
+/// Which wiki slice this api reads from. Resolved once at process start from
+/// `WIKI_SOURCE` (default `"wiki"`). Set `WIKI_SOURCE=wiki_v2` and roll
+/// api-rs to flip the docs-site SPA + agent + standup over to the v2 KB.
+/// Kept as a `&'static str` (leaked once) so query strings can interpolate
+/// the table names with no per-request allocation, and so the values used to
+/// `format!` table names are always drawn from a closed, vetted set (no user
+/// input ever reaches the SQL string).
+fn resolve_wiki_source() -> &'static str {
+    match std::env::var("WIKI_SOURCE")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .as_deref()
+    {
+        Some("wiki_v2") => "wiki_v2",
+        // Anything else (unset, "wiki", or an unrecognized value) falls back
+        // to the v1 slice. We deliberately don't accept arbitrary source
+        // names — only the two known slices — to keep the table-name
+        // derivation below safe.
+        _ => "wiki",
+    }
+}
+
+/// `company_context_documents.source` filter for every read (bound as `$N`).
+static WIKI_SOURCE: LazyLock<&'static str> = LazyLock::new(resolve_wiki_source);
+
+/// `wiki_ingested_sources[_v2]` table name (interpolated via `format!` into
+/// the `/changes` + `/timeline` queries).
+static INGESTED_TABLE: LazyLock<&'static str> = LazyLock::new(|| match *WIKI_SOURCE {
+    "wiki_v2" => "wiki_ingested_sources_v2",
+    _ => "wiki_ingested_sources",
+});
+
+/// `wiki_page_revisions[_v2]` table name (interpolated into the `/diff` +
+/// `/revisions` queries).
+static REVISIONS_TABLE: LazyLock<&'static str> = LazyLock::new(|| match *WIKI_SOURCE {
+    "wiki_v2" => "wiki_page_revisions_v2",
+    _ => "wiki_page_revisions",
+});
+
+/// `wiki_directives[_v2]` table name (LEFT JOINed in the `/timeline` query
+/// for directive event attribution).
+static DIRECTIVES_TABLE: LazyLock<&'static str> = LazyLock::new(|| match *WIKI_SOURCE {
+    "wiki_v2" => "wiki_directives_v2",
+    _ => "wiki_directives",
+});
 
 /// Build the `/wiki/*` sub-router with a permissive (or `CORS_ORIGINS`-scoped)
 /// CORS layer. These routes are public, read-only GETs.
@@ -259,9 +310,10 @@ let pool = pool(&state)?;
     let rows = sqlx::query(
         "SELECT document_id, source_type, title, body, url, updated_at \
          FROM company_context_documents \
-         WHERE source = 'wiki' AND source_type = ANY($1::text[]) \
+         WHERE source = $1 AND source_type = ANY($2::text[]) \
          ORDER BY title",
     )
+    .bind(*WIKI_SOURCE)
     .bind(&PAGE_TYPES[..])
     .fetch_all(&pool)
     .await?;
@@ -376,11 +428,12 @@ async fn wiki_search(
     let rows = sqlx::query(
         "SELECT document_id, source_type, title, body, url, updated_at \
          FROM company_context_documents \
-         WHERE source = 'wiki' AND source_type = ANY($1::text[]) \
-         AND (title ||| $2::text OR body ||| $2::text) \
+         WHERE source = $1 AND source_type = ANY($2::text[]) \
+         AND (title ||| $3::text OR body ||| $3::text) \
          ORDER BY paradedb.score(document_id) DESC, updated_at DESC \
-         LIMIT $3",
+         LIMIT $4",
     )
+    .bind(*WIKI_SOURCE)
     .bind(&PAGE_TYPES[..])
     .bind(&q)
     .bind(limit)
@@ -448,9 +501,10 @@ async fn wiki_page(state: &AppState, document_id: &str) -> Result<Json<Value>, A
 let pool = pool(&state)?;
     let row = sqlx::query(
         "SELECT document_id, source_type, title, body, url, updated_at \
-         FROM company_context_documents WHERE document_id = $1 AND source = 'wiki'",
+         FROM company_context_documents WHERE document_id = $1 AND source = $2",
     )
     .bind(document_id)
+    .bind(*WIKI_SOURCE)
     .fetch_optional(&pool)
     .await?;
 
@@ -473,11 +527,13 @@ let pool = pool(&state)?;
 async fn wiki_revisions(state: &AppState, document_id: &str) -> Result<Json<Value>, ApiError> {
 let pool = pool(&state)?;
     // The table may not exist before first ingest — Python swallows the error
-    // and returns an empty list.
-    let rows = sqlx::query(
-        "SELECT revised_at, content_hash, length(body) AS len FROM wiki_page_revisions \
+    // and returns an empty list. Reads from `wiki_page_revisions` (v1) or
+    // `wiki_page_revisions_v2` depending on `WIKI_SOURCE`.
+    let rows = sqlx::query(&format!(
+        "SELECT revised_at, content_hash, length(body) AS len FROM {} \
          WHERE document_id = $1 ORDER BY revised_at DESC LIMIT 200",
-    )
+        *REVISIONS_TABLE
+    ))
     .bind(document_id)
     .fetch_all(&pool)
     .await;
@@ -517,13 +573,23 @@ async fn wiki_changes(
     let pool = pool(&state)?;
     let (start, end) = window(q.days, q.since.as_deref(), q.until.as_deref());
 
+    // Page list anchored on EVENT time (source_updated_at), not row mtime
+    // (updated_at), so the v2 backfill stays positionally aligned with the
+    // Event Feed. During backfill, every page row's `updated_at` is
+    // wall-clock `now()` (when the synthesis ran), which would lump every
+    // backfilled page into "this week" and make the /diff endpoint return
+    // empty (because the revision history points back to the real event
+    // times). `source_updated_at` is set to the source's event time by
+    // `_upsert_page`, so this matches the timeline source dots + the
+    // revision timestamps that `body_at(start)` / `body_at(end)` resolve to.
     let page_rows = sqlx::query(
-        "SELECT document_id, source_type, title, url, updated_at \
+        "SELECT document_id, source_type, title, url, source_updated_at AS updated_at \
          FROM company_context_documents \
-         WHERE source = 'wiki' AND source_type = ANY($1::text[]) \
-         AND updated_at >= $2 AND updated_at < $3 \
-         ORDER BY updated_at DESC",
+         WHERE source = $1 AND source_type = ANY($2::text[]) \
+         AND source_updated_at >= $3 AND source_updated_at < $4 \
+         ORDER BY source_updated_at DESC",
     )
+    .bind(*WIKI_SOURCE)
     .bind(&PAGE_TYPES[..])
     .bind(start)
     .bind(end)
@@ -554,12 +620,13 @@ async fn wiki_changes(
     // were backfilled into the wiki today. Same shape as /wiki/timeline.
     let mut sources: Vec<Value> = Vec::new();
     let mut src_by_kind: BTreeMap<String, i64> = BTreeMap::new();
-    let src_rows = sqlx::query(
-        "SELECT source_key, kind, ingested_at, occurred_at FROM wiki_ingested_sources \
+    let src_rows = sqlx::query(&format!(
+        "SELECT source_key, kind, ingested_at, occurred_at FROM {} \
          WHERE COALESCE(occurred_at, ingested_at) >= $1 \
            AND COALESCE(occurred_at, ingested_at) < $2 \
          ORDER BY COALESCE(occurred_at, ingested_at) DESC",
-    )
+        *INGESTED_TABLE
+    ))
     .bind(start)
     .bind(end)
     .fetch_all(&pool)
@@ -622,17 +689,19 @@ async fn wiki_timeline(
     // Non-directive rows get NULLs for these columns and the frontend just
     // omits them. The COALESCEs above on (occurred_at, ingested_at) still
     // drive the time axis.
-    let rows = sqlx::query(
+    let rows = sqlx::query(&format!(
         "SELECT s.source_key, s.kind, s.ingested_at, s.occurred_at, s.title, s.url, \
                 d.actor_slack_id, d.actor_name, d.body AS directive_body, \
                 d.target_pages, d.status AS directive_status, \
                 d.resulting_revision_ids \
-         FROM wiki_ingested_sources s \
-         LEFT JOIN wiki_directives d ON d.source_key = s.source_key \
+         FROM {ingested} s \
+         LEFT JOIN {directives} d ON d.source_key = s.source_key \
          WHERE COALESCE(s.occurred_at, s.ingested_at) >= $1 \
            AND COALESCE(s.occurred_at, s.ingested_at) < $2 \
          ORDER BY COALESCE(s.occurred_at, s.ingested_at) DESC",
-    )
+        ingested = *INGESTED_TABLE,
+        directives = *DIRECTIVES_TABLE,
+    ))
     .bind(start)
     .bind(end)
     .fetch_all(&pool)
@@ -744,11 +813,12 @@ async fn body_at(
     document_id: &str,
     when: OffsetDateTime,
 ) -> Result<Option<(String, String)>, ApiError> {
-    let row = sqlx::query(
-        "SELECT body, revised_at FROM wiki_page_revisions \
+    let row = sqlx::query(&format!(
+        "SELECT body, revised_at FROM {} \
          WHERE document_id = $1 AND revised_at <= $2 \
          ORDER BY revised_at DESC LIMIT 1",
-    )
+        *REVISIONS_TABLE
+    ))
     .bind(document_id)
     .bind(when)
     .fetch_optional(pool)
@@ -769,9 +839,10 @@ async fn wiki_diff(
     let pool = pool(&state)?;
 
     let page = sqlx::query(
-        "SELECT title FROM company_context_documents WHERE document_id = $1 AND source = 'wiki'",
+        "SELECT title FROM company_context_documents WHERE document_id = $1 AND source = $2",
     )
     .bind(&id)
+    .bind(*WIKI_SOURCE)
     .fetch_optional(&pool)
     .await?;
     let Some(page) = page else {
@@ -788,10 +859,11 @@ async fn wiki_diff(
     let (after_body, after_at) = match after {
         Some(after) => after,
         None => {
-            let latest = sqlx::query(
-                "SELECT body, revised_at FROM wiki_page_revisions WHERE document_id = $1 \
+            let latest = sqlx::query(&format!(
+                "SELECT body, revised_at FROM {} WHERE document_id = $1 \
                  ORDER BY revised_at DESC LIMIT 1",
-            )
+                *REVISIONS_TABLE
+            ))
             .bind(&id)
     .fetch_optional(&pool)
             .await?;

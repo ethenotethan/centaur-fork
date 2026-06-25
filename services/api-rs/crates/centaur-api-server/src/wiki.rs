@@ -31,6 +31,7 @@ const PAGE_TYPES: [&str; 4] = ["wiki_goal", "wiki_project", "wiki_entity", "wiki
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
         .route("/wiki/graph", get(wiki_graph))
+        .route("/wiki/search", get(wiki_search))
         .route("/wiki/changes", get(wiki_changes))
         .route("/wiki/timeline", get(wiki_timeline))
         .route("/wiki/diff", get(wiki_diff))
@@ -90,6 +91,12 @@ struct ChangesQuery {
     days: Option<f64>,
     since: Option<String>,
     until: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SearchQuery {
+    q: String,
+    limit: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -330,6 +337,77 @@ fn wikilinks(body: &str) -> Vec<String> {
         i += 1;
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// GET /wiki/search?q=…&limit=N
+// ---------------------------------------------------------------------------
+
+async fn wiki_search(
+    State(state): State<AppState>,
+    Query(params): Query<SearchQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let pool = pool(&state)?;
+    let limit = params.limit.unwrap_or(20).min(50);
+    let q = params.q.trim().to_string();
+    if q.is_empty() {
+        return Ok(Json(json!({"results": []})));
+    }
+    // ParadeDB BM25 full-text search over wiki page titles + bodies.
+    let rows = sqlx::query(
+        "SELECT document_id, source_type, title, body, url, updated_at \
+         FROM company_context_documents \
+         WHERE source = 'wiki' AND source_type = ANY($1::text[]) \
+         AND (title ||| $2::text OR body ||| $2::text) \
+         ORDER BY paradedb.score(document_id) DESC, updated_at DESC \
+         LIMIT $3",
+    )
+    .bind(&PAGE_TYPES[..])
+    .bind(&q)
+    .bind(limit)
+    .fetch_all(&pool)
+    .await?;
+
+    let results: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            let body: String = r.try_get("body").unwrap_or_default();
+            let snippet = truncate_body(&body, &q);
+            json!({
+                "id": r.try_get::<String, _>("document_id").unwrap_or_default(),
+                "title": r.try_get::<String, _>("title").unwrap_or_default(),
+                "type": strip_wiki_prefix(&r.try_get::<String, _>("source_type").unwrap_or_default()),
+                "snippet": snippet,
+                "url": r.try_get::<String, _>("url").unwrap_or_default(),
+                "updated_at": iso(r.try_get("updated_at").ok()),
+            })
+        })
+        .collect();
+
+    Ok(Json(json!({"results": results})))
+}
+
+/// Extract a ~200-char snippet from `body` around the first occurrence of any
+/// search term. Falls back to the leading 200 chars if no term is found.
+fn truncate_body(body: &str, query: &str) -> String {
+    let terms: Vec<&str> = query.split_whitespace().collect();
+    let lower = body.to_lowercase();
+    let pos = terms
+        .iter()
+        .filter_map(|t| lower.find(t))
+        .min()
+        .unwrap_or(0);
+    let start = pos.saturating_sub(60);
+    let end = (pos + 160).min(body.len());
+    let mut s = String::with_capacity(end - start + 8);
+    if start > 0 {
+        s.push_str("…");
+    }
+    s.push_str(&body[start..end]);
+    if end < body.len() {
+        s.push_str("…");
+    }
+    s
 }
 
 // ---------------------------------------------------------------------------

@@ -37,16 +37,16 @@ jobs:
             -fork fork.yaml \
             -out index.html
 
-      - name: Publish to op-geth branch
+      - name: Publish to gh-pages branch
         run: |
           cd /tmp
           mkdir -p site
           cp "$GITHUB_WORKSPACE/index.html" site/
           cd site
           git init
-          git checkout -b op-geth
+          git checkout -b gh-pages
           git add index.html
           git -c user.name="forkdiff-bot" -c user.email="forkdiff-bot@users.noreply.github.com" \
             commit -m "forkdiff: update $(date -u +%Y-%m-%d)"
           git remote add origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
-          git push origin op-geth --force
+          git push origin gh-pages --force

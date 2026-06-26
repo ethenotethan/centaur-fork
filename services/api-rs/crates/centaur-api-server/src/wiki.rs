@@ -286,6 +286,21 @@ fn source_display(source_key: &str) -> Map<String, Value> {
         m.insert("url".into(), json!(""));
         return m;
     }
+    if let Some(rest) = source_key.strip_prefix("coordinator:") {
+        // coordinator:version:<commit>  — a coordinator build detected via /health
+        // coordinator:stats:<YYYY-MM-DD> — a daily network-stats snapshot from /v1/stats
+        let (sub_kind, label) = if let Some(commit) = rest.strip_prefix("version:") {
+            ("coordinator_version", format!("coordinator {commit}"))
+        } else if let Some(date) = rest.strip_prefix("stats:") {
+            ("coordinator_stats", format!("coordinator stats {date}"))
+        } else {
+            ("coordinator", rest.to_owned())
+        };
+        m.insert("kind".into(), json!(sub_kind));
+        m.insert("label".into(), json!(label));
+        m.insert("url".into(), json!("https://api.darkbloom.dev"));
+        return m;
+    }
     m.insert("kind".into(), json!("other"));
     m.insert("label".into(), json!(source_key));
     m.insert("url".into(), json!(""));

@@ -303,12 +303,18 @@ struct PageRow {
     body: String,
     url: String,
     updated_at: Option<OffsetDateTime>,
+    /// `metadata->>'goal_kind'` — only populated on `wiki_goal` rows. Used by
+    /// the docs SPA to render type badges (strategic / capability /
+    /// operational) and to group goals on the Goals view. Empty string when
+    /// missing or non-goal.
+    goal_kind: String,
 }
 
 async fn wiki_graph(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
 let pool = pool(&state)?;
     let rows = sqlx::query(
-        "SELECT document_id, source_type, title, body, url, updated_at \
+        "SELECT document_id, source_type, title, body, url, updated_at, \
+                COALESCE(metadata->>'goal_kind', '') AS goal_kind \
          FROM company_context_documents \
          WHERE source = $1 AND source_type = ANY($2::text[]) \
          ORDER BY title",
@@ -327,6 +333,7 @@ let pool = pool(&state)?;
             body: r.try_get("body").unwrap_or_default(),
             url: r.try_get("url").unwrap_or_default(),
             updated_at: r.try_get("updated_at").ok(),
+            goal_kind: r.try_get("goal_kind").unwrap_or_default(),
         })
         .collect();
 
@@ -341,6 +348,10 @@ let pool = pool(&state)?;
         node.insert("type".into(), json!(strip_wiki_prefix(&p.source_type)));
         node.insert("url".into(), json!(p.url));
         node.insert("updated_at".into(), json!(iso(p.updated_at)));
+        // Only emit goal_kind on goal nodes (empty string elsewhere is noise).
+        if p.source_type == "wiki_goal" && !p.goal_kind.is_empty() {
+            node.insert("goal_kind".into(), json!(p.goal_kind));
+        }
         nodes.push(node);
     }
 
@@ -500,7 +511,8 @@ async fn wiki_page_or_revisions(
 async fn wiki_page(state: &AppState, document_id: &str) -> Result<Json<Value>, ApiError> {
 let pool = pool(&state)?;
     let row = sqlx::query(
-        "SELECT document_id, source_type, title, body, url, updated_at \
+        "SELECT document_id, source_type, title, body, url, updated_at, \
+                COALESCE(metadata->>'goal_kind', '') AS goal_kind \
          FROM company_context_documents WHERE document_id = $1 AND source = $2",
     )
     .bind(document_id)
@@ -514,14 +526,19 @@ let pool = pool(&state)?;
 
     let source_type: String = row.try_get("source_type").unwrap_or_default();
     let updated_at: Option<OffsetDateTime> = row.try_get("updated_at").ok();
-    Ok(Json(json!({
-        "id": row.try_get::<String, _>("document_id").unwrap_or_default(),
-        "title": row.try_get::<String, _>("title").unwrap_or_default(),
-        "type": strip_wiki_prefix(&source_type),
-        "body": row.try_get::<String, _>("body").unwrap_or_default(),
-        "url": row.try_get::<String, _>("url").unwrap_or_default(),
-        "updated_at": iso(updated_at),
-    })))
+    let goal_kind: String = row.try_get("goal_kind").unwrap_or_default();
+    let mut out = Map::new();
+    out.insert("id".into(), json!(row.try_get::<String, _>("document_id").unwrap_or_default()));
+    out.insert("title".into(), json!(row.try_get::<String, _>("title").unwrap_or_default()));
+    out.insert("type".into(), json!(strip_wiki_prefix(&source_type)));
+    out.insert("body".into(), json!(row.try_get::<String, _>("body").unwrap_or_default()));
+    out.insert("url".into(), json!(row.try_get::<String, _>("url").unwrap_or_default()));
+    out.insert("updated_at".into(), json!(iso(updated_at)));
+    // Only emit goal_kind on goal pages (irrelevant on entities/projects/topics).
+    if source_type == "wiki_goal" && !goal_kind.is_empty() {
+        out.insert("goal_kind".into(), json!(goal_kind));
+    }
+    Ok(Json(Value::Object(out)))
 }
 
 async fn wiki_revisions(state: &AppState, document_id: &str) -> Result<Json<Value>, ApiError> {

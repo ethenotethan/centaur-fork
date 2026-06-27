@@ -20,7 +20,8 @@ jobs:
       - name: Fetch upstream
         run: |
           git remote add upstream https://github.com/paradigmxyz/centaur.git
-          git fetch upstream main --depth=1
+          git fetch upstream main
+          git branch main upstream/main
 
       - uses: actions/setup-go@v5
         with:

@@ -85,6 +85,7 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/wiki/search", get(wiki_search))
         .route("/wiki/changes", get(wiki_changes))
         .route("/wiki/timeline", get(wiki_timeline))
+        .route("/wiki/revisions-timeline", get(wiki_revisions_timeline))
         .route("/wiki/diff", get(wiki_diff))
         // A wiki `document_id` is a path that may contain slashes/colons
         // (e.g. `wiki:topic:foo`), so capture the remainder as a wildcard.
@@ -863,6 +864,81 @@ async fn wiki_timeline(
         "event_count": events.len(),
         "events_by_kind": by_kind,
         "events": events,
+    })))
+}
+
+// ---------------------------------------------------------------------------
+// GET /wiki/revisions-timeline
+// ---------------------------------------------------------------------------
+/// Wiki page-edit volume over time — the *stateful output* counterpart to
+/// `/wiki/timeline` (which is the raw *input* events). Buckets
+/// `wiki_page_revisions[_v2].revised_at` into `date_trunc` buckets whose unit
+/// adapts to the window (hour / day / week / month) and returns per-bucket
+/// revision counts + the cumulative total BEFORE the window start, so the docs
+/// SPA can draw a true cumulative "knowledge accrued" curve overlaid on the
+/// event-volume bars. Read-only; v1/v2-aware via `*REVISIONS_TABLE`.
+async fn wiki_revisions_timeline(
+    State(state): State<AppState>,
+    Query(q): Query<ChangesQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let pool = pool(&state)?;
+    let (start, end) = window(q.days, q.since.as_deref(), q.until.as_deref());
+
+    // Choose a Postgres date_trunc unit matching the SPA's adaptive bucketing.
+    let span_days = (end - start).as_seconds_f64() / 86_400.0;
+    let unit = if span_days <= 2.0 {
+        "hour"
+    } else if span_days <= 45.0 {
+        "day"
+    } else if span_days <= 240.0 {
+        "week"
+    } else {
+        "month"
+    };
+
+    // Per-bucket revision counts within the window.
+    let mut buckets: Vec<Value> = Vec::new();
+    let mut total_in_window: i64 = 0;
+    let rows = sqlx::query(&format!(
+        "SELECT date_trunc('{unit}', revised_at) AS bucket, count(*) AS n \
+         FROM {rev} \
+         WHERE revised_at >= $1 AND revised_at < $2 \
+         GROUP BY 1 ORDER BY 1",
+        unit = unit,
+        rev = *REVISIONS_TABLE,
+    ))
+    .bind(start)
+    .bind(end)
+    .fetch_all(&pool)
+    .await;
+
+    if let Ok(rows) = rows {
+        for r in &rows {
+            let bucket: Option<OffsetDateTime> = r.try_get("bucket").ok();
+            let n: i64 = r.try_get("n").unwrap_or(0);
+            total_in_window += n;
+            buckets.push(json!({ "bucket": iso(bucket), "count": n }));
+        }
+    }
+
+    // Cumulative revisions that already existed BEFORE the window opened, so the
+    // SPA can seed the cumulative curve at the correct height (not from zero).
+    let baseline: i64 = sqlx::query_scalar(&format!(
+        "SELECT count(*) FROM {rev} WHERE revised_at < $1",
+        rev = *REVISIONS_TABLE,
+    ))
+    .bind(start)
+    .fetch_one(&pool)
+    .await
+    .unwrap_or(0);
+
+    Ok(Json(json!({
+        "since": iso(Some(start)),
+        "until": iso(Some(end)),
+        "unit": unit,
+        "baseline": baseline,
+        "total_in_window": total_in_window,
+        "buckets": buckets,
     })))
 }
 

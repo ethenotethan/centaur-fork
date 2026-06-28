@@ -331,6 +331,14 @@ struct PageRow {
     glossary: String,
     term: String,
     definition: String,
+    /// `metadata->>'person'` ("true" on Contributor entries — a `wiki_entity`
+    /// row tagged `metadata.person=true`), plus display_name / github_login /
+    /// roles. Surfaced conditionally like glossary so the SPA can render a
+    /// Contributors view. Empty when not a person row.
+    person: String,
+    display_name: String,
+    github_login: String,
+    roles: String,
 }
 
 async fn wiki_graph(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
@@ -340,7 +348,11 @@ let pool = pool(&state)?;
                 COALESCE(metadata->>'goal_kind', '') AS goal_kind, \
                 COALESCE(metadata->>'glossary', '') AS glossary, \
                 COALESCE(metadata->>'term', '') AS term, \
-                COALESCE(metadata->>'definition', '') AS definition \
+                COALESCE(metadata->>'definition', '') AS definition, \
+                COALESCE(metadata->>'person', '') AS person, \
+                COALESCE(metadata->>'display_name', '') AS display_name, \
+                COALESCE(metadata->>'github_login', '') AS github_login, \
+                COALESCE(metadata->>'roles', '') AS roles \
          FROM company_context_documents \
          WHERE source = $1 AND source_type = ANY($2::text[]) \
          ORDER BY title",
@@ -363,6 +375,10 @@ let pool = pool(&state)?;
             glossary: r.try_get("glossary").unwrap_or_default(),
             term: r.try_get("term").unwrap_or_default(),
             definition: r.try_get("definition").unwrap_or_default(),
+            person: r.try_get("person").unwrap_or_default(),
+            display_name: r.try_get("display_name").unwrap_or_default(),
+            github_login: r.try_get("github_login").unwrap_or_default(),
+            roles: r.try_get("roles").unwrap_or_default(),
         })
         .collect();
 
@@ -386,6 +402,13 @@ let pool = pool(&state)?;
             node.insert("glossary".into(), json!(true));
             node.insert("term".into(), json!(p.term));
             node.insert("definition".into(), json!(p.definition));
+        }
+        // Only emit person fields on contributor-tagged rows.
+        if p.person == "true" {
+            node.insert("person".into(), json!(true));
+            node.insert("display_name".into(), json!(p.display_name));
+            node.insert("github_login".into(), json!(p.github_login));
+            node.insert("roles".into(), json!(p.roles));
         }
         nodes.push(node);
     }
@@ -550,7 +573,11 @@ let pool = pool(&state)?;
                 COALESCE(metadata->>'goal_kind', '') AS goal_kind, \
                 COALESCE(metadata->>'glossary', '') AS glossary, \
                 COALESCE(metadata->>'term', '') AS term, \
-                COALESCE(metadata->>'definition', '') AS definition \
+                COALESCE(metadata->>'definition', '') AS definition, \
+                COALESCE(metadata->>'person', '') AS person, \
+                COALESCE(metadata->>'display_name', '') AS display_name, \
+                COALESCE(metadata->>'github_login', '') AS github_login, \
+                COALESCE(metadata->>'roles', '') AS roles \
          FROM company_context_documents WHERE document_id = $1 AND source = $2",
     )
     .bind(document_id)
@@ -568,6 +595,10 @@ let pool = pool(&state)?;
     let glossary: String = row.try_get("glossary").unwrap_or_default();
     let term: String = row.try_get("term").unwrap_or_default();
     let definition: String = row.try_get("definition").unwrap_or_default();
+    let person: String = row.try_get("person").unwrap_or_default();
+    let display_name: String = row.try_get("display_name").unwrap_or_default();
+    let github_login: String = row.try_get("github_login").unwrap_or_default();
+    let roles: String = row.try_get("roles").unwrap_or_default();
     let mut out = Map::new();
     out.insert("id".into(), json!(row.try_get::<String, _>("document_id").unwrap_or_default()));
     out.insert("title".into(), json!(row.try_get::<String, _>("title").unwrap_or_default()));
@@ -584,6 +615,13 @@ let pool = pool(&state)?;
         out.insert("glossary".into(), json!(true));
         out.insert("term".into(), json!(term));
         out.insert("definition".into(), json!(definition));
+    }
+    // Only emit person fields on contributor-tagged rows.
+    if person == "true" {
+        out.insert("person".into(), json!(true));
+        out.insert("display_name".into(), json!(display_name));
+        out.insert("github_login".into(), json!(github_login));
+        out.insert("roles".into(), json!(roles));
     }
     Ok(Json(Value::Object(out)))
 }

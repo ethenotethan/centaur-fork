@@ -323,13 +323,23 @@ struct PageRow {
     /// operational) and to group goals on the Goals view. Empty string when
     /// missing or non-goal.
     goal_kind: String,
+    /// `metadata->>'glossary'` ("true" on curated glossary entries — a
+    /// `wiki_topic` row tagged `metadata.glossary=true`), plus the term +
+    /// definition. Mirrors the `goal_kind` precedent: surfaced conditionally so
+    /// the SPA can render a dedicated Glossary view. Empty when not a glossary row.
+    glossary: String,
+    term: String,
+    definition: String,
 }
 
 async fn wiki_graph(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
 let pool = pool(&state)?;
     let rows = sqlx::query(
         "SELECT document_id, source_type, title, body, url, updated_at, \
-                COALESCE(metadata->>'goal_kind', '') AS goal_kind \
+                COALESCE(metadata->>'goal_kind', '') AS goal_kind, \
+                COALESCE(metadata->>'glossary', '') AS glossary, \
+                COALESCE(metadata->>'term', '') AS term, \
+                COALESCE(metadata->>'definition', '') AS definition \
          FROM company_context_documents \
          WHERE source = $1 AND source_type = ANY($2::text[]) \
          ORDER BY title",
@@ -349,6 +359,9 @@ let pool = pool(&state)?;
             url: r.try_get("url").unwrap_or_default(),
             updated_at: r.try_get("updated_at").ok(),
             goal_kind: r.try_get("goal_kind").unwrap_or_default(),
+            glossary: r.try_get("glossary").unwrap_or_default(),
+            term: r.try_get("term").unwrap_or_default(),
+            definition: r.try_get("definition").unwrap_or_default(),
         })
         .collect();
 
@@ -366,6 +379,12 @@ let pool = pool(&state)?;
         // Only emit goal_kind on goal nodes (empty string elsewhere is noise).
         if p.source_type == "wiki_goal" && !p.goal_kind.is_empty() {
             node.insert("goal_kind".into(), json!(p.goal_kind));
+        }
+        // Only emit glossary fields on glossary-tagged rows (curated terms).
+        if p.glossary == "true" {
+            node.insert("glossary".into(), json!(true));
+            node.insert("term".into(), json!(p.term));
+            node.insert("definition".into(), json!(p.definition));
         }
         nodes.push(node);
     }
@@ -527,7 +546,10 @@ async fn wiki_page(state: &AppState, document_id: &str) -> Result<Json<Value>, A
 let pool = pool(&state)?;
     let row = sqlx::query(
         "SELECT document_id, source_type, title, body, url, updated_at, \
-                COALESCE(metadata->>'goal_kind', '') AS goal_kind \
+                COALESCE(metadata->>'goal_kind', '') AS goal_kind, \
+                COALESCE(metadata->>'glossary', '') AS glossary, \
+                COALESCE(metadata->>'term', '') AS term, \
+                COALESCE(metadata->>'definition', '') AS definition \
          FROM company_context_documents WHERE document_id = $1 AND source = $2",
     )
     .bind(document_id)
@@ -542,6 +564,9 @@ let pool = pool(&state)?;
     let source_type: String = row.try_get("source_type").unwrap_or_default();
     let updated_at: Option<OffsetDateTime> = row.try_get("updated_at").ok();
     let goal_kind: String = row.try_get("goal_kind").unwrap_or_default();
+    let glossary: String = row.try_get("glossary").unwrap_or_default();
+    let term: String = row.try_get("term").unwrap_or_default();
+    let definition: String = row.try_get("definition").unwrap_or_default();
     let mut out = Map::new();
     out.insert("id".into(), json!(row.try_get::<String, _>("document_id").unwrap_or_default()));
     out.insert("title".into(), json!(row.try_get::<String, _>("title").unwrap_or_default()));
@@ -552,6 +577,12 @@ let pool = pool(&state)?;
     // Only emit goal_kind on goal pages (irrelevant on entities/projects/topics).
     if source_type == "wiki_goal" && !goal_kind.is_empty() {
         out.insert("goal_kind".into(), json!(goal_kind));
+    }
+    // Only emit glossary fields on glossary-tagged rows (curated terms).
+    if glossary == "true" {
+        out.insert("glossary".into(), json!(true));
+        out.insert("term".into(), json!(term));
+        out.insert("definition".into(), json!(definition));
     }
     Ok(Json(Value::Object(out)))
 }

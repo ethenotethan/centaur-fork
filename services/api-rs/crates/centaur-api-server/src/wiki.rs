@@ -301,6 +301,16 @@ fn source_display(source_key: &str) -> Map<String, Value> {
         m.insert("url".into(), json!("https://api.darkbloom.dev"));
         return m;
     }
+    if let Some(rest) = source_key.strip_prefix("news:") {
+        // news:<google-news-guid> — a public press article about the Darkbloom
+        // protocol (relevance-gated). The timeline route reads the richer
+        // .title (headline + outlet) from the DB row; this is the fallback
+        // label. No reliable per-article URL from the guid alone, so empty.
+        m.insert("kind".into(), json!("news"));
+        m.insert("label".into(), json!(format!("news {rest}")));
+        m.insert("url".into(), json!(""));
+        return m;
+    }
     m.insert("kind".into(), json!("other"));
     m.insert("label".into(), json!(source_key));
     m.insert("url".into(), json!(""));

@@ -341,6 +341,8 @@ struct PageRow {
     github_login: String,
     roles: String,
     bio: String,
+    last_active: String,
+    active: String,
 }
 
 async fn wiki_graph(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
@@ -355,7 +357,9 @@ let pool = pool(&state)?;
                 COALESCE(metadata->>'display_name', '') AS display_name, \
                 COALESCE(metadata->>'github_login', '') AS github_login, \
                 COALESCE(metadata->>'roles', '') AS roles, \
-                COALESCE(metadata->>'bio', '') AS bio \
+                COALESCE(metadata->>'bio', '') AS bio, \
+                COALESCE(metadata->>'last_active', '') AS last_active, \
+                COALESCE(metadata->>'active', '') AS active \
          FROM company_context_documents \
          WHERE source = $1 AND source_type = ANY($2::text[]) \
          ORDER BY title",
@@ -383,6 +387,8 @@ let pool = pool(&state)?;
             github_login: r.try_get("github_login").unwrap_or_default(),
             roles: r.try_get("roles").unwrap_or_default(),
             bio: r.try_get("bio").unwrap_or_default(),
+            last_active: r.try_get("last_active").unwrap_or_default(),
+            active: r.try_get("active").unwrap_or_default(),
         })
         .collect();
 
@@ -414,6 +420,8 @@ let pool = pool(&state)?;
             node.insert("github_login".into(), json!(p.github_login));
             node.insert("roles".into(), json!(p.roles));
             node.insert("bio".into(), json!(p.bio));
+            node.insert("last_active".into(), json!(p.last_active));
+            node.insert("active".into(), json!(p.active == "true"));
         }
         nodes.push(node);
     }
@@ -583,7 +591,9 @@ let pool = pool(&state)?;
                 COALESCE(metadata->>'display_name', '') AS display_name, \
                 COALESCE(metadata->>'github_login', '') AS github_login, \
                 COALESCE(metadata->>'roles', '') AS roles, \
-                COALESCE(metadata->>'bio', '') AS bio \
+                COALESCE(metadata->>'bio', '') AS bio, \
+                COALESCE(metadata->>'last_active', '') AS last_active, \
+                COALESCE(metadata->>'active', '') AS active \
          FROM company_context_documents WHERE document_id = $1 AND source = $2",
     )
     .bind(document_id)
@@ -606,6 +616,8 @@ let pool = pool(&state)?;
     let github_login: String = row.try_get("github_login").unwrap_or_default();
     let roles: String = row.try_get("roles").unwrap_or_default();
     let bio: String = row.try_get("bio").unwrap_or_default();
+    let last_active: String = row.try_get("last_active").unwrap_or_default();
+    let active: String = row.try_get("active").unwrap_or_default();
     let mut out = Map::new();
     out.insert("id".into(), json!(row.try_get::<String, _>("document_id").unwrap_or_default()));
     out.insert("title".into(), json!(row.try_get::<String, _>("title").unwrap_or_default()));
@@ -630,6 +642,8 @@ let pool = pool(&state)?;
         out.insert("github_login".into(), json!(github_login));
         out.insert("roles".into(), json!(roles));
         out.insert("bio".into(), json!(bio));
+        out.insert("last_active".into(), json!(last_active));
+        out.insert("active".into(), json!(active == "true"));
     }
     Ok(Json(Value::Object(out)))
 }

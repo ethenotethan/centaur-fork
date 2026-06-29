@@ -1132,12 +1132,24 @@ class SlackEtlClient:
         channels = []
         cursor = None
 
+        # Private-channel allowlist: SLACK_ETL_PRIVATE_CHANNEL_IDS (comma-separated
+        # channel IDs) opts specific PRIVATE channels into the ETL. Default empty
+        # → public-only behavior is unchanged. When set, we request private
+        # channels too but keep only the allowlisted ones (the ETL user token
+        # must be a member). Public channels are always included as before.
+        private_allow = {
+            c.strip()
+            for c in (os.getenv("SLACK_ETL_PRIVATE_CHANNEL_IDS") or "").split(",")
+            if c.strip()
+        }
+        list_types = "public_channel,private_channel" if private_allow else "public_channel"
+
         while len(channels) < limit:
             try:
                 response = self._retry_on_ratelimit(
                     self._client.conversations_list,
                     method_key="etl.conversations.list",
-                    types="public_channel",
+                    types=list_types,
                     limit=min(limit - len(channels), self._MAX_PAGE_SIZE),
                     cursor=cursor,
                     exclude_archived=True,
@@ -1151,7 +1163,9 @@ class SlackEtlClient:
                 )
 
             for channel in response.get("channels", []):
-                if channel.get("is_private", False):
+                # Private channels are included ONLY if explicitly allowlisted;
+                # public channels are always included (unchanged behavior).
+                if channel.get("is_private", False) and channel.get("id", "") not in private_allow:
                     continue
                 channels.append(
                     {

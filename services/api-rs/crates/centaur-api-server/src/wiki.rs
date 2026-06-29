@@ -181,10 +181,7 @@ fn window(
         let normalized = s.replace('Z', "+00:00");
         OffsetDateTime::parse(&normalized, &Rfc3339).unwrap_or(default)
     };
-    (
-        parse(since, now - Duration::days(1)),
-        parse(until, now),
-    )
+    (parse(since, now - Duration::days(1)), parse(until, now))
 }
 
 /// Derive a title/url from a `wiki_ingested_sources` key like
@@ -346,7 +343,7 @@ struct PageRow {
 }
 
 async fn wiki_graph(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-let pool = pool(&state)?;
+    let pool = pool(&state)?;
     let rows = sqlx::query(
         "SELECT document_id, source_type, title, body, url, updated_at, \
                 COALESCE(metadata->>'goal_kind', '') AS goal_kind, \
@@ -452,7 +449,10 @@ let pool = pool(&state)?;
     }
 
     for (node, p) in nodes.iter_mut().zip(pages.iter()) {
-        node.insert("degree".into(), json!(deg.get(&p.document_id).copied().unwrap_or(0)));
+        node.insert(
+            "degree".into(),
+            json!(deg.get(&p.document_id).copied().unwrap_or(0)),
+        );
         let backlinks: Vec<String> = backl
             .get(&p.document_id)
             .map(|s| s.iter().cloned().collect())
@@ -580,7 +580,7 @@ async fn wiki_page_or_revisions(
 }
 
 async fn wiki_page(state: &AppState, document_id: &str) -> Result<Json<Value>, ApiError> {
-let pool = pool(&state)?;
+    let pool = pool(&state)?;
     let row = sqlx::query(
         "SELECT document_id, source_type, title, body, url, updated_at, \
                 COALESCE(metadata->>'goal_kind', '') AS goal_kind, \
@@ -619,11 +619,23 @@ let pool = pool(&state)?;
     let last_active: String = row.try_get("last_active").unwrap_or_default();
     let active: String = row.try_get("active").unwrap_or_default();
     let mut out = Map::new();
-    out.insert("id".into(), json!(row.try_get::<String, _>("document_id").unwrap_or_default()));
-    out.insert("title".into(), json!(row.try_get::<String, _>("title").unwrap_or_default()));
+    out.insert(
+        "id".into(),
+        json!(row.try_get::<String, _>("document_id").unwrap_or_default()),
+    );
+    out.insert(
+        "title".into(),
+        json!(row.try_get::<String, _>("title").unwrap_or_default()),
+    );
     out.insert("type".into(), json!(strip_wiki_prefix(&source_type)));
-    out.insert("body".into(), json!(row.try_get::<String, _>("body").unwrap_or_default()));
-    out.insert("url".into(), json!(row.try_get::<String, _>("url").unwrap_or_default()));
+    out.insert(
+        "body".into(),
+        json!(row.try_get::<String, _>("body").unwrap_or_default()),
+    );
+    out.insert(
+        "url".into(),
+        json!(row.try_get::<String, _>("url").unwrap_or_default()),
+    );
     out.insert("updated_at".into(), json!(iso(updated_at)));
     // Only emit goal_kind on goal pages (irrelevant on entities/projects/topics).
     if source_type == "wiki_goal" && !goal_kind.is_empty() {
@@ -649,7 +661,7 @@ let pool = pool(&state)?;
 }
 
 async fn wiki_revisions(state: &AppState, document_id: &str) -> Result<Json<Value>, ApiError> {
-let pool = pool(&state)?;
+    let pool = pool(&state)?;
     // The table may not exist before first ingest — Python swallows the error
     // and returns an empty list. Reads from `wiki_page_revisions` (v1) or
     // `wiki_page_revisions_v2` depending on `WIKI_SOURCE`.
@@ -856,7 +868,10 @@ async fn wiki_timeline(
                 stored_title
             };
             let url = if stored_url.is_empty() {
-                disp.get("url").and_then(Value::as_str).unwrap_or("").to_owned()
+                disp.get("url")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned()
             } else {
                 stored_url
             };
@@ -871,8 +886,7 @@ async fn wiki_timeline(
             let directive_body: Option<String> = r.try_get("directive_body").ok();
             let target_pages: Option<Vec<String>> = r.try_get("target_pages").ok();
             let directive_status: Option<String> = r.try_get("directive_status").ok();
-            let resulting_revision_ids: Option<Vec<i64>> =
-                r.try_get("resulting_revision_ids").ok();
+            let resulting_revision_ids: Option<Vec<i64>> = r.try_get("resulting_revision_ids").ok();
 
             // For directives, prefer the directive body as the label (verbatim
             // quote is what you want to see on the dot), capped to a tooltip-
@@ -1052,7 +1066,9 @@ async fn wiki_diff(
     let before = body_at(&pool, &id, start).await?;
     let after = body_at(&pool, &id, end).await?;
 
-    let (before_body, before_at) = before.clone().unwrap_or_else(|| (String::new(), String::new()));
+    let (before_body, before_at) = before
+        .clone()
+        .unwrap_or_else(|| (String::new(), String::new()));
 
     // If no revision at/after the window end, fall back to the latest body.
     let (after_body, after_at) = match after {
@@ -1064,7 +1080,7 @@ async fn wiki_diff(
                 *REVISIONS_TABLE
             ))
             .bind(&id)
-    .fetch_optional(&pool)
+            .fetch_optional(&pool)
             .await?;
             match latest {
                 Some(r) => {
@@ -1080,11 +1096,19 @@ async fn wiki_diff(
     let changed = before_body != after_body;
     let from_label = format!(
         "{title} @ {}",
-        if before_at.is_empty() { "start" } else { &before_at }
+        if before_at.is_empty() {
+            "start"
+        } else {
+            &before_at
+        }
     );
     let to_label = format!(
         "{title} @ {}",
-        if after_at.is_empty() { "now" } else { &after_at }
+        if after_at.is_empty() {
+            "now"
+        } else {
+            &after_at
+        }
     );
 
     let diff_lines: Vec<String> = if changed {
@@ -1162,6 +1186,424 @@ fn unified_diff(
         }
     }
     out
+}
+
+// ===========================================================================
+// Live product-lifecycle sources (DAR-369 / DAR-368 follow-up)
+// ===========================================================================
+//
+// The wiki tools above serve the *synthesized* knowledge base — accurate but
+// lagging (wiki-sync/ETL cadence) and lossy (only sources the maintainer chose
+// to ingest). To answer "what actually happened in the last 24h" with the same
+// fidelity as asking the Centaur agent directly, we read the LIVE sources the
+// agent reads: GitHub (merged PRs + releases), Linear (issues + state), and
+// Slack (channel history). The api-rs container already holds the same plaintext
+// credentials the agent's tools use (envFrom centaur-infra-env), so the relay
+// calls these APIs directly — no sandbox/tool-server hop. Recipes mirror the
+// wiki_maintainer `_fetch_*` functions verbatim.
+
+/// Repos to scan for GitHub activity. `WIKI_REPOS` (comma-separated owner/repo)
+/// or a sensible default. Shared with the wiki maintainer's repo set.
+fn lifecycle_repos() -> Vec<String> {
+    std::env::var("WIKI_REPOS")
+        .ok()
+        .map(|s| {
+            s.split(',')
+                .map(|r| r.trim().to_owned())
+                .filter(|r| !r.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| vec!["Layr-Labs/d-inference".to_owned()])
+}
+
+/// Fine-grained GitHub PAT that works against the Layr-Labs org. NEVER the
+/// classic `GITHUB_TOKEN`/`GITHUB_PAT` (those 403 on the org).
+fn github_token() -> Option<String> {
+    std::env::var("CODE_REVIEW_GITHUB_TOKEN")
+        .ok()
+        .filter(|t| !t.is_empty())
+        .or_else(|| {
+            std::env::var("GITHUB_GATEWAY_TOKEN")
+                .ok()
+                .filter(|t| !t.is_empty())
+        })
+}
+
+/// Internal + provider Slack channels the lifecycle feed scans (channel history
+/// via the bot token). `WIKI_SLACK_CHANNEL_IDS` + `WIKI_INTERNAL_SLACK_CHANNEL_IDS`
+/// (comma-separated); default = providers/support/eng/product.
+fn lifecycle_slack_channels() -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for var in ["WIKI_SLACK_CHANNEL_IDS", "WIKI_INTERNAL_SLACK_CHANNEL_IDS"] {
+        if let Ok(v) = std::env::var(var) {
+            out.extend(
+                v.split(',')
+                    .map(|c| c.trim().to_owned())
+                    .filter(|c| !c.is_empty()),
+            );
+        }
+    }
+    if out.is_empty() {
+        // providers, support, eng, product
+        out = ["C0B0CAQC8P5", "C0B0JMULP3L", "C0B6S8MUDRR", "C0B6YGM83N1"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn lifecycle_http() -> reqwest::Client {
+    reqwest::Client::builder()
+        .user_agent("centaur-mcp-lifecycle")
+        .timeout(std::time::Duration::from_secs(25))
+        .build()
+        .unwrap_or_default()
+}
+
+/// Minimal percent-encoding for query-string values (the reqwest `query`
+/// feature isn't enabled in this build, so we build URLs by hand). Encodes
+/// everything that isn't an unreserved char.
+fn qenc(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// GitHub merged PRs across `repos` since `start`. Returns lifecycle items.
+async fn fetch_live_merged_prs(
+    client: &reqwest::Client,
+    token: &str,
+    repos: &[String],
+    start: OffsetDateTime,
+    per_repo: usize,
+) -> Vec<Value> {
+    let since = start.format(&Rfc3339).unwrap_or_default();
+    let mut out = Vec::new();
+    for repo in repos {
+        let q = format!("repo:{repo} is:pr is:merged merged:>={since}");
+        let url = format!(
+            "https://api.github.com/search/issues?q={}&per_page=50&sort=created&order=desc",
+            qenc(&q)
+        );
+        let resp = client
+            .get(&url)
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .bearer_auth(token)
+            .send()
+            .await;
+        let Ok(resp) = resp else { continue };
+        if !resp.status().is_success() {
+            continue;
+        }
+        let Ok(body) = resp.json::<Value>().await else {
+            continue;
+        };
+        let items = body
+            .get("items")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        for it in items.into_iter().take(per_repo) {
+            let num = it.get("number").and_then(Value::as_i64).unwrap_or_default();
+            let title = it
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            let author = it
+                .get("user")
+                .and_then(|u| u.get("login"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            // PR-search uses `closed_at` as the merge proxy on is:merged results.
+            let when = it
+                .get("closed_at")
+                .and_then(Value::as_str)
+                .or_else(|| it.get("updated_at").and_then(Value::as_str))
+                .unwrap_or("")
+                .to_owned();
+            let body_text = it
+                .get("body")
+                .and_then(Value::as_str)
+                .map(|b| b.chars().take(800).collect::<String>())
+                .unwrap_or_default();
+            out.push(json!({
+                "kind": "pr",
+                "repo": repo,
+                "id": format!("{repo}#{num}"),
+                "title": title,
+                "author": author,
+                "occurred_at": when,
+                "url": format!("https://github.com/{repo}/pull/{num}"),
+                "body": body_text,
+            }));
+        }
+    }
+    out
+}
+
+/// GitHub releases across `repos` published since `start`.
+async fn fetch_live_releases(
+    client: &reqwest::Client,
+    token: &str,
+    repos: &[String],
+    start: OffsetDateTime,
+) -> Vec<Value> {
+    let mut out = Vec::new();
+    for repo in repos {
+        let url = format!("https://api.github.com/repos/{repo}/releases?per_page=20");
+        let resp = client
+            .get(&url)
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .bearer_auth(token)
+            .send()
+            .await;
+        let Ok(resp) = resp else { continue };
+        if !resp.status().is_success() {
+            continue;
+        }
+        let Ok(arr) = resp.json::<Value>().await else {
+            continue;
+        };
+        for rel in arr.as_array().cloned().unwrap_or_default() {
+            if rel.get("draft").and_then(Value::as_bool).unwrap_or(false) {
+                continue;
+            }
+            let published = rel
+                .get("published_at")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if published.is_empty() {
+                continue;
+            }
+            // Lexical RFC3339 compare is valid for the Zulu timestamps GitHub returns.
+            if published < start.format(&Rfc3339).unwrap_or_default().as_str() {
+                continue;
+            }
+            let tag = rel
+                .get("tag_name")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            let name = rel
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or(&tag)
+                .to_owned();
+            out.push(json!({
+                "kind": "release",
+                "repo": repo,
+                "id": format!("{repo}@{tag}"),
+                "title": name,
+                "occurred_at": published,
+                "url": rel.get("html_url").and_then(Value::as_str).unwrap_or("").to_owned(),
+                "body": rel.get("body").and_then(Value::as_str)
+                    .map(|b| b.chars().take(800).collect::<String>()).unwrap_or_default(),
+            }));
+        }
+    }
+    out
+}
+
+/// Linear issues updated since `start` for the configured team.
+async fn fetch_live_linear(
+    client: &reqwest::Client,
+    key: &str,
+    start: OffsetDateTime,
+) -> Vec<Value> {
+    let team = std::env::var("WIKI_LINEAR_TEAM_ID")
+        .ok()
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| "120662cb-3a74-4b46-8105-a80adee59391".to_owned());
+    let since = start.format(&Rfc3339).unwrap_or_default();
+    let query = "query($teamId:String!,$since:DateTimeOrDuration!){ team(id:$teamId){ \
+        issues(filter:{updatedAt:{gt:$since}}, first:50, orderBy:updatedAt){ nodes{ \
+        identifier title url updatedAt state{name type} assignee{name} } } } }";
+    let payload = json!({"query": query, "variables": {"teamId": team, "since": since}});
+    let resp = client
+        .post("https://api.linear.app/graphql")
+        // Linear personal API keys go in Authorization BARE (no "Bearer ").
+        .header("Authorization", key)
+        .header("Content-Type", "application/json")
+        .json(&payload)
+        .send()
+        .await;
+    let Ok(resp) = resp else { return Vec::new() };
+    if !resp.status().is_success() {
+        return Vec::new();
+    }
+    let Ok(body) = resp.json::<Value>().await else {
+        return Vec::new();
+    };
+    let nodes = body
+        .pointer("/data/team/issues/nodes")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    nodes
+        .into_iter()
+        .map(|n| {
+            let ident = n.get("identifier").and_then(Value::as_str).unwrap_or("").to_owned();
+            json!({
+                "kind": "linear",
+                "id": ident,
+                "title": n.get("title").and_then(Value::as_str).unwrap_or("").to_owned(),
+                "state": n.get("state").and_then(|s| s.get("name")).and_then(Value::as_str).unwrap_or("").to_owned(),
+                "assignee": n.get("assignee").and_then(|a| a.get("name")).and_then(Value::as_str).unwrap_or("").to_owned(),
+                "occurred_at": n.get("updatedAt").and_then(Value::as_str).unwrap_or("").to_owned(),
+                "url": n.get("url").and_then(Value::as_str).unwrap_or("").to_owned(),
+            })
+        })
+        .collect()
+}
+
+/// Slack channel-history activity across the configured channels since `start`.
+/// Uses the bot token + `conversations.history` (the `search.messages` user
+/// token isn't a search-capable token in this deployment).
+async fn fetch_live_slack(
+    client: &reqwest::Client,
+    bot_token: &str,
+    channels: &[String],
+    start: OffsetDateTime,
+    per_channel: usize,
+) -> Vec<Value> {
+    let oldest = (start.unix_timestamp()).to_string();
+    let mut out = Vec::new();
+    for chan in channels {
+        let url = format!(
+            "https://slack.com/api/conversations.history?channel={}&oldest={}&limit=60",
+            qenc(chan),
+            qenc(&oldest)
+        );
+        let resp = client.get(&url).bearer_auth(bot_token).send().await;
+        let Ok(resp) = resp else { continue };
+        let Ok(body) = resp.json::<Value>().await else {
+            continue;
+        };
+        if !body.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+            continue;
+        }
+        let msgs = body
+            .get("messages")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        for m in msgs.into_iter().take(per_channel) {
+            // Skip channel-join/system subtypes; keep real messages.
+            if m.get("subtype").and_then(Value::as_str).is_some() {
+                continue;
+            }
+            let text = m.get("text").and_then(Value::as_str).unwrap_or("");
+            if text.trim().is_empty() {
+                continue;
+            }
+            let ts = m.get("ts").and_then(Value::as_str).unwrap_or("");
+            // Slack ts is "<epoch>.<seq>"; derive an ISO occurred_at.
+            let occurred = ts
+                .split('.')
+                .next()
+                .and_then(|s| s.parse::<i64>().ok())
+                .and_then(|e| OffsetDateTime::from_unix_timestamp(e).ok())
+                .and_then(|dt| dt.format(&Rfc3339).ok())
+                .unwrap_or_default();
+            out.push(json!({
+                "kind": "slack",
+                "channel_id": chan,
+                "id": format!("slack:{chan}:{ts}"),
+                "title": text.chars().take(160).collect::<String>(),
+                "occurred_at": occurred,
+                "url": "",
+                "body": text.chars().take(800).collect::<String>(),
+            }));
+        }
+    }
+    out
+}
+
+/// Aggregate the live product lifecycle across all sources in a window.
+/// `sources` filters which streams to include (default: all).
+async fn live_recent_activity(q: &ChangesQuery, sources: &[String]) -> Value {
+    let (start, _end) = window(q.days, q.since.as_deref(), q.until.as_deref());
+    let client = lifecycle_http();
+    let want = |name: &str| sources.is_empty() || sources.iter().any(|s| s == name);
+
+    let mut items: Vec<Value> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+
+    if want("github") || want("pr") || want("release") {
+        match github_token() {
+            Some(tok) => {
+                let repos = lifecycle_repos();
+                if want("github") || want("pr") {
+                    items.extend(fetch_live_merged_prs(&client, &tok, &repos, start, 50).await);
+                }
+                if want("github") || want("release") {
+                    items.extend(fetch_live_releases(&client, &tok, &repos, start).await);
+                }
+            }
+            None => errors.push("github: no CODE_REVIEW_GITHUB_TOKEN/GITHUB_GATEWAY_TOKEN".into()),
+        }
+    }
+    if want("linear") {
+        match std::env::var("LINEAR_API_KEY")
+            .ok()
+            .filter(|k| !k.is_empty())
+        {
+            Some(key) => items.extend(fetch_live_linear(&client, &key, start).await),
+            None => errors.push("linear: no LINEAR_API_KEY".into()),
+        }
+    }
+    if want("slack") {
+        match std::env::var("SLACK_BOT_TOKEN")
+            .ok()
+            .filter(|k| !k.is_empty())
+        {
+            Some(tok) => {
+                let chans = lifecycle_slack_channels();
+                items.extend(fetch_live_slack(&client, &tok, &chans, start, 60).await);
+            }
+            None => errors.push("slack: no SLACK_BOT_TOKEN".into()),
+        }
+    }
+
+    // Oldest → newest by occurred_at.
+    items.sort_by(|a, b| {
+        a.get("occurred_at")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .cmp(b.get("occurred_at").and_then(Value::as_str).unwrap_or(""))
+    });
+    let mut by_kind: BTreeMap<String, i64> = BTreeMap::new();
+    for it in &items {
+        if let Some(k) = it.get("kind").and_then(Value::as_str) {
+            *by_kind.entry(k.to_owned()).or_insert(0) += 1;
+        }
+    }
+
+    json!({
+        "since": iso(Some(start)),
+        "live": true,
+        "note": "Live read from GitHub/Linear/Slack APIs (not the wiki's synthesized state) \
+                 — same sources the Centaur agent reads.",
+        "count": items.len(),
+        "by_kind": by_kind,
+        "errors": errors,
+        "items": items,
+    })
 }
 
 // ===========================================================================
@@ -1270,6 +1712,59 @@ fn mcp_tools() -> Value {
                 },
                 "required": ["id"]
             }
+        },
+        {
+            "name": "recent_activity",
+            "description": "LIVE product-lifecycle feed: what actually happened across GitHub (merged PRs + releases), Linear (issues + state), and provider/internal Slack in a recent window, oldest->newest. Reads the SAME live sources the Centaur agent reads — NOT the wiki's synthesized/lagging state. Use this for 'what happened in the last 24h / this week'. Args: days (number, default 1) OR since/until (ISO); optional sources (array subset of [\"github\",\"pr\",\"release\",\"linear\",\"slack\"]).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "days": { "type": "number", "description": "Look back this many days (default 1)." },
+                    "since": { "type": "string", "description": "ISO start (alternative to days)." },
+                    "until": { "type": "string", "description": "ISO end (optional)." },
+                    "sources": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Optional subset: github, pr, release, linear, slack. Default: all."
+                    }
+                }
+            }
+        },
+        {
+            "name": "list_merged_prs",
+            "description": "LIVE merged GitHub pull requests (with bodies) across the tracked repos in a window. Args: days OR since/until.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "days": { "type": "number" },
+                    "since": { "type": "string" },
+                    "until": { "type": "string" }
+                }
+            }
+        },
+        {
+            "name": "list_linear_issues",
+            "description": "LIVE Linear issues updated in a window (identifier, title, state, assignee, url). Args: days OR since/until.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "days": { "type": "number" },
+                    "since": { "type": "string" },
+                    "until": { "type": "string" }
+                }
+            }
+        },
+        {
+            "name": "list_slack_activity",
+            "description": "LIVE Slack messages from the tracked provider + internal channels in a window (channel history). Args: days OR since/until.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "days": { "type": "number" },
+                    "since": { "type": "string" },
+                    "until": { "type": "string" }
+                }
+            }
         }
     ])
 }
@@ -1290,7 +1785,8 @@ async fn mcp_call_tool(state: &AppState, name: &str, args: &Value) -> Result<Val
             let q =
                 s("q").ok_or_else(|| ApiError::BadRequest("search_wiki requires 'q'".into()))?;
             let limit = args.get("limit").and_then(Value::as_i64);
-            let Json(v) = wiki_search(State(state.clone()), Query(SearchQuery { q, limit })).await?;
+            let Json(v) =
+                wiki_search(State(state.clone()), Query(SearchQuery { q, limit })).await?;
             Ok(v)
         }
         "read_page" => {
@@ -1306,7 +1802,11 @@ async fn mcp_call_tool(state: &AppState, name: &str, args: &Value) -> Result<Val
         "recent_changes" => {
             let Json(v) = wiki_changes(
                 State(state.clone()),
-                Query(ChangesQuery { days: f("days"), since: s("since"), until: s("until") }),
+                Query(ChangesQuery {
+                    days: f("days"),
+                    since: s("since"),
+                    until: s("until"),
+                }),
             )
             .await?;
             Ok(v)
@@ -1314,7 +1814,11 @@ async fn mcp_call_tool(state: &AppState, name: &str, args: &Value) -> Result<Val
         "event_timeline" => {
             let Json(v) = wiki_timeline(
                 State(state.clone()),
-                Query(ChangesQuery { days: f("days"), since: s("since"), until: s("until") }),
+                Query(ChangesQuery {
+                    days: f("days"),
+                    since: s("since"),
+                    until: s("until"),
+                }),
             )
             .await?;
             Ok(v)
@@ -1324,10 +1828,58 @@ async fn mcp_call_tool(state: &AppState, name: &str, args: &Value) -> Result<Val
                 s("id").ok_or_else(|| ApiError::BadRequest("page_diff requires 'id'".into()))?;
             let Json(v) = wiki_diff(
                 State(state.clone()),
-                Query(DiffQuery { id, days: f("days"), since: s("since"), until: s("until") }),
+                Query(DiffQuery {
+                    id,
+                    days: f("days"),
+                    since: s("since"),
+                    until: s("until"),
+                }),
             )
             .await?;
             Ok(v)
+        }
+        // --- Live product-lifecycle tools (read external APIs directly) ---
+        "recent_activity" => {
+            let sources: Vec<String> = args
+                .get("sources")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let q = ChangesQuery {
+                days: f("days"),
+                since: s("since"),
+                until: s("until"),
+            };
+            Ok(live_recent_activity(&q, &sources).await)
+        }
+        "list_merged_prs" => {
+            let q = ChangesQuery {
+                days: f("days"),
+                since: s("since"),
+                until: s("until"),
+            };
+            Ok(live_recent_activity(&q, &["pr".to_owned()]).await)
+        }
+        "list_linear_issues" => {
+            let q = ChangesQuery {
+                days: f("days"),
+                since: s("since"),
+                until: s("until"),
+            };
+            Ok(live_recent_activity(&q, &["linear".to_owned()]).await)
+        }
+        "list_slack_activity" => {
+            let q = ChangesQuery {
+                days: f("days"),
+                since: s("since"),
+                until: s("until"),
+            };
+            Ok(live_recent_activity(&q, &["slack".to_owned()]).await)
         }
         other => Err(ApiError::BadRequest(format!("unknown tool: {other}"))),
     }
@@ -1336,7 +1888,10 @@ async fn mcp_call_tool(state: &AppState, name: &str, args: &Value) -> Result<Val
 /// Bearer-token check. `MCP_RELAY_TOKEN` unset → relay disabled (404, so the
 /// endpoint's existence isn't revealed). Otherwise require an exact match.
 fn mcp_authorized(headers: &HeaderMap) -> Result<(), StatusCode> {
-    let Some(expected) = std::env::var("MCP_RELAY_TOKEN").ok().filter(|t| !t.is_empty()) else {
+    let Some(expected) = std::env::var("MCP_RELAY_TOKEN")
+        .ok()
+        .filter(|t| !t.is_empty())
+    else {
         return Err(StatusCode::NOT_FOUND);
     };
     let presented = headers
@@ -1386,7 +1941,10 @@ async fn mcp_handler(
         "tools/call" => {
             let params = req.get("params").cloned().unwrap_or(Value::Null);
             let name = params.get("name").and_then(Value::as_str).unwrap_or("");
-            let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+            let args = params
+                .get("arguments")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
             match mcp_call_tool(&state, name, &args).await {
                 Ok(v) => rpc_result(id, tool_content(&v)).into_response(),
                 // Tool-level errors → successful JSON-RPC result with isError=true

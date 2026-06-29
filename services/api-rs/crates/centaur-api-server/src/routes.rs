@@ -208,6 +208,7 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
         .route("/api/workflows/events", post(emit_workflow_event))
         .route("/api/webhooks/{slug}", any(invoke_workflow_webhook))
         .merge(wiki::router())
+        .merge(wiki::mcp_router())
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(|request: &Request<Body>| {

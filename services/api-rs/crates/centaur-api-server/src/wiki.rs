@@ -17,8 +17,9 @@ use std::sync::LazyLock;
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::{HeaderValue, Method},
-    routing::get,
+    http::{HeaderMap, HeaderValue, Method, StatusCode},
+    response::IntoResponse,
+    routing::{get, post},
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -1147,4 +1148,246 @@ fn unified_diff(
         }
     }
     out
+}
+
+// ===========================================================================
+// MCP relay — read-only Model Context Protocol server over the wiki (DAR-368)
+// ===========================================================================
+//
+// Exposes the read-only wiki surface as a remote, Streamable-HTTP MCP server so
+// external MCP clients (Claude Desktop, Cursor, etc. — e.g. EigenLabs) can query
+// the knowledge base directly. It is a THIN PROTOCOL SHIM: every tool delegates
+// to the existing `wiki_*` handlers above (same PgPool, same query logic, same
+// JSON), so there is zero duplication of the read logic.
+//
+// Transport: a single `POST /mcp` JSON-RPC 2.0 endpoint handling `initialize`,
+// `tools/list`, and `tools/call` (synchronous JSON responses — these are short
+// reads, no SSE streaming needed for v1). `notifications/initialized` is acked.
+//
+// Auth: bearer token. `MCP_RELAY_TOKEN` (env) must match the request's
+// `Authorization: Bearer <token>`. Unset → the relay is disabled (404), so it
+// can't accidentally serve unauthenticated in an unconfigured environment.
+
+const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
+
+/// `/mcp` sub-router. No CORS layer (MCP clients are servers/desktop apps, not
+/// browsers); auth is enforced per-request inside the handler.
+pub(crate) fn mcp_router() -> Router<AppState> {
+    Router::new().route("/mcp", post(mcp_handler))
+}
+
+fn rpc_result(id: Value, result: Value) -> Json<Value> {
+    Json(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
+}
+
+fn rpc_error(id: Value, code: i64, message: &str) -> Json<Value> {
+    Json(json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": { "code": code, "message": message },
+    }))
+}
+
+/// The read-only tool catalog. Each entry is (name, description, inputSchema).
+fn mcp_tools() -> Value {
+    json!([
+        {
+            "name": "search_wiki",
+            "description": "Full-text search the Darkbloom/Centaur knowledge base. Returns matching wiki pages (title, type, snippet, url).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "q": { "type": "string", "description": "Search query." },
+                    "limit": { "type": "integer", "description": "Max results (default 20)." }
+                },
+                "required": ["q"]
+            }
+        },
+        {
+            "name": "read_page",
+            "description": "Read a single wiki page's full markdown body by document_id (e.g. 'wiki:entity:coordinator-deployment').",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "document_id": { "type": "string", "description": "The wiki page id, e.g. wiki:topic:release-process." }
+                },
+                "required": ["document_id"]
+            }
+        },
+        {
+            "name": "wiki_graph",
+            "description": "The full wiki knowledge graph: every page (goal/project/entity/topic) as a node, with [[wikilink]] edges, degree, and backlinks. Use to list all pages or understand structure.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "recent_changes",
+            "description": "Pages changed and sources ingested in a recent window. Args: days (number) OR since/until (ISO timestamps).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "days": { "type": "number", "description": "Look back this many days (e.g. 7)." },
+                    "since": { "type": "string", "description": "ISO start time (alternative to days)." },
+                    "until": { "type": "string", "description": "ISO end time (optional)." }
+                }
+            }
+        },
+        {
+            "name": "event_timeline",
+            "description": "Cross-stream event feed (PRs, Linear issues, provider Slack, releases, directives, coordinator telemetry, news) in a window, oldest->newest. Args: days OR since/until.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "days": { "type": "number" },
+                    "since": { "type": "string" },
+                    "until": { "type": "string" }
+                }
+            }
+        },
+        {
+            "name": "page_diff",
+            "description": "Unified diff of a wiki page's body over a window (what changed). Args: id (document_id), plus days OR since/until.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "The wiki page document_id." },
+                    "days": { "type": "number" },
+                    "since": { "type": "string" },
+                    "until": { "type": "string" }
+                },
+                "required": ["id"]
+            }
+        }
+    ])
+}
+
+/// Wrap a tool's JSON output in MCP `tools/call` result shape (text content with
+/// the pretty-printed JSON — the standard way to return structured data).
+fn tool_content(value: &Value) -> Value {
+    let text = serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string());
+    json!({ "content": [ { "type": "text", "text": text } ], "isError": false })
+}
+
+/// Dispatch a single `tools/call` to the underlying read-only wiki handler.
+async fn mcp_call_tool(state: &AppState, name: &str, args: &Value) -> Result<Value, ApiError> {
+    let s = |k: &str| args.get(k).and_then(Value::as_str).map(str::to_owned);
+    let f = |k: &str| args.get(k).and_then(Value::as_f64);
+    match name {
+        "search_wiki" => {
+            let q =
+                s("q").ok_or_else(|| ApiError::BadRequest("search_wiki requires 'q'".into()))?;
+            let limit = args.get("limit").and_then(Value::as_i64);
+            let Json(v) = wiki_search(State(state.clone()), Query(SearchQuery { q, limit })).await?;
+            Ok(v)
+        }
+        "read_page" => {
+            let id = s("document_id")
+                .ok_or_else(|| ApiError::BadRequest("read_page requires 'document_id'".into()))?;
+            let Json(v) = wiki_page(state, &id).await?;
+            Ok(v)
+        }
+        "wiki_graph" => {
+            let Json(v) = wiki_graph(State(state.clone())).await?;
+            Ok(v)
+        }
+        "recent_changes" => {
+            let Json(v) = wiki_changes(
+                State(state.clone()),
+                Query(ChangesQuery { days: f("days"), since: s("since"), until: s("until") }),
+            )
+            .await?;
+            Ok(v)
+        }
+        "event_timeline" => {
+            let Json(v) = wiki_timeline(
+                State(state.clone()),
+                Query(ChangesQuery { days: f("days"), since: s("since"), until: s("until") }),
+            )
+            .await?;
+            Ok(v)
+        }
+        "page_diff" => {
+            let id =
+                s("id").ok_or_else(|| ApiError::BadRequest("page_diff requires 'id'".into()))?;
+            let Json(v) = wiki_diff(
+                State(state.clone()),
+                Query(DiffQuery { id, days: f("days"), since: s("since"), until: s("until") }),
+            )
+            .await?;
+            Ok(v)
+        }
+        other => Err(ApiError::BadRequest(format!("unknown tool: {other}"))),
+    }
+}
+
+/// Bearer-token check. `MCP_RELAY_TOKEN` unset → relay disabled (404, so the
+/// endpoint's existence isn't revealed). Otherwise require an exact match.
+fn mcp_authorized(headers: &HeaderMap) -> Result<(), StatusCode> {
+    let Some(expected) = std::env::var("MCP_RELAY_TOKEN").ok().filter(|t| !t.is_empty()) else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+    let presented = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer "))
+        .unwrap_or("");
+    // Length-checked, constant-time-ish byte compare.
+    if presented.len() == expected.len()
+        && presented
+            .bytes()
+            .zip(expected.bytes())
+            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+            == 0
+    {
+        Ok(())
+    } else {
+        Err(StatusCode::UNAUTHORIZED)
+    }
+}
+
+async fn mcp_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Json<Value>,
+) -> axum::response::Response {
+    if let Err(code) = mcp_authorized(&headers) {
+        return code.into_response();
+    }
+    let req = body.0;
+    let id = req.get("id").cloned().unwrap_or(Value::Null);
+    let method = req.get("method").and_then(Value::as_str).unwrap_or("");
+
+    match method {
+        "initialize" => rpc_result(
+            id,
+            json!({
+                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "capabilities": { "tools": {} },
+                "serverInfo": { "name": "darkbloom-wiki-mcp", "version": "1.0.0" }
+            }),
+        )
+        .into_response(),
+        // Client lifecycle notification — no id; just ack.
+        "notifications/initialized" => StatusCode::ACCEPTED.into_response(),
+        "tools/list" => rpc_result(id, json!({ "tools": mcp_tools() })).into_response(),
+        "tools/call" => {
+            let params = req.get("params").cloned().unwrap_or(Value::Null);
+            let name = params.get("name").and_then(Value::as_str).unwrap_or("");
+            let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+            match mcp_call_tool(&state, name, &args).await {
+                Ok(v) => rpc_result(id, tool_content(&v)).into_response(),
+                // Tool-level errors → successful JSON-RPC result with isError=true
+                // (MCP convention), so clients surface it without a transport error.
+                Err(e) => rpc_result(
+                    id,
+                    json!({
+                        "content": [ { "type": "text", "text": format!("error: {e}") } ],
+                        "isError": true
+                    }),
+                )
+                .into_response(),
+            }
+        }
+        "ping" => rpc_result(id, json!({})).into_response(),
+        other => rpc_error(id, -32601, &format!("method not found: {other}")).into_response(),
+    }
 }

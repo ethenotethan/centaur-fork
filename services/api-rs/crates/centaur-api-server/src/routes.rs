@@ -49,7 +49,6 @@ use crate::{
         ListWorkflowRunsQuery, OnHarnessConflict, SessionContextResponse, SessionSseEvent,
         SlackThreadContext, stream_error_sse,
     },
-    wiki,
 };
 
 #[derive(Clone)]
@@ -128,6 +127,11 @@ impl AppState {
             .ok_or_else(|| ApiError::ServiceUnavailable("api-rs is still starting".to_owned()))
     }
 
+    // The wiki read handlers were the only `pool()` consumers; they moved to the
+    // standalone wiki-api service (DAR-395). Kept as upstream-shaped plumbing (the
+    // field is still populated at boot) so a future in-binary DB endpoint can use
+    // it without re-threading state — hence #[allow(dead_code)].
+    #[allow(dead_code)]
     pub(crate) fn pool(&self) -> Result<PgPool, ApiError> {
         self.pool
             .read()
@@ -207,8 +211,9 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
         )
         .route("/api/workflows/events", post(emit_workflow_event))
         .route("/api/webhooks/{slug}", any(invoke_workflow_webhook))
-        .merge(wiki::router())
-        .merge(wiki::mcp_router())
+        // NOTE: the read-only /wiki/* API + /mcp relay were decomposed out of
+        // api-rs into the standalone `wiki-api` service (DAR-395); the ingress
+        // routes /wiki + /mcp there now. Removed from here to fully decouple.
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(|request: &Request<Body>| {

@@ -2,7 +2,6 @@ pub mod client;
 mod error;
 mod routes;
 pub mod types;
-mod wiki;
 
 pub use centaur_session_runtime::{SandboxRuntime, SessionRuntime};
 pub use error::ApiError;

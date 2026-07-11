@@ -180,11 +180,69 @@ pub fn build_router_with_session_and_workflow_runtime(
     build_router_with_app_state(AppState::ready(runtime, workflows, pool))
 }
 
+/// Bearer tokens accepted on the control-plane routes, resolved once at boot.
+/// `CENTAUR_API_KEY` and/or `SLACKBOT_API_KEY` (both accepted so the existing
+/// deployment secret works unchanged). If NEITHER is set, auth is disabled —
+/// upstream-compatible default for local dev / integration tests.
+fn api_bearer_tokens() -> &'static Vec<String> {
+    static TOKENS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    TOKENS.get_or_init(|| {
+        ["CENTAUR_API_KEY", "SLACKBOT_API_KEY"]
+            .iter()
+            .filter_map(|name| env::var(name).ok())
+            .map(|token| token.trim().to_owned())
+            .filter(|token| !token.is_empty())
+            .collect()
+    })
+}
+
+/// Constant-time-ish token comparison via SHA-256 digests (avoids leaking
+/// prefix length through early-exit string compare; sha2 is already a dep).
+fn token_in(candidate: &str, tokens: &[String]) -> bool {
+    let candidate_digest = Sha256::digest(candidate.as_bytes());
+    tokens
+        .iter()
+        .any(|token| Sha256::digest(token.as_bytes()) == candidate_digest)
+}
+
+fn token_matches(candidate: &str) -> bool {
+    token_in(candidate, api_bearer_tokens())
+}
+
+/// Require a valid bearer token on the session / sandbox / workflow control
+/// APIs. These spawn agent sandboxes with iron-proxy-injected credentials, so
+/// they must never be reachable unauthenticated once exposed beyond the
+/// cluster. Accepts `Authorization: Bearer <token>` or `x-centaur-api-key:
+/// <token>` (the header shapes existing internal callers + external clients
+/// already send). `/api/webhooks/{slug}` is NOT behind this — each webhook
+/// spec carries its own signature/bearer auth. Probes + /metrics stay open.
+async fn require_api_auth(request: Request<Body>, next: Next) -> Response {
+    if api_bearer_tokens().is_empty() {
+        return next.run(request).await;
+    }
+    let headers = request.headers();
+    let bearer = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| {
+            v.strip_prefix("Bearer ")
+                .or_else(|| v.strip_prefix("bearer "))
+        });
+    let api_key_header = headers
+        .get("x-centaur-api-key")
+        .and_then(|v| v.to_str().ok());
+    let authorized = bearer.map(token_matches).unwrap_or(false)
+        || api_key_header.map(token_matches).unwrap_or(false);
+    if authorized {
+        next.run(request).await
+    } else {
+        ApiError::Unauthorized("missing or invalid API bearer token".to_owned()).into_response()
+    }
+}
+
 pub fn build_router_with_app_state(state: AppState) -> Router {
-    Router::new()
-        .route("/healthz", get(healthz))
-        .route("/readyz", get(readyz))
-        .route("/metrics", get(metrics))
+    // Control-plane routes: bearer-auth required (when a token is configured).
+    let protected = Router::new()
         .route(
             "/api/session/{thread_key}",
             post(create_or_get_session).get(get_session_context),
@@ -210,6 +268,13 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
             post(cancel_workflow_run),
         )
         .route("/api/workflows/events", post(emit_workflow_event))
+        .layer(middleware::from_fn(require_api_auth));
+
+    Router::new()
+        .route("/healthz", get(healthz))
+        .route("/readyz", get(readyz))
+        .route("/metrics", get(metrics))
+        .merge(protected)
         .route("/api/webhooks/{slug}", any(invoke_workflow_webhook))
         // NOTE: the read-only /wiki/* API + /mcp relay were decomposed out of
         // api-rs into the standalone `wiki-api` service (DAR-395); the ingress
@@ -1004,5 +1069,35 @@ mod webhook_tests {
         )
         .unwrap_err();
         assert!(matches!(error, ApiError::Internal(_)));
+    }
+}
+
+#[cfg(test)]
+mod api_auth_tests {
+    // api_bearer_tokens() caches via OnceLock so env permutations aren't
+    // testable in-process; token_in() is the comparison under test and the
+    // middleware is a thin header-extraction wrapper over it.
+    use super::token_in;
+
+    #[test]
+    fn exact_token_matches() {
+        let tokens = vec!["secret-a".to_owned(), "secret-b".to_owned()];
+        assert!(token_in("secret-a", &tokens));
+        assert!(token_in("secret-b", &tokens));
+    }
+
+    #[test]
+    fn near_misses_rejected() {
+        let tokens = vec!["secret-a".to_owned()];
+        assert!(!token_in("secret-a ", &tokens));
+        assert!(!token_in("secret-A", &tokens));
+        assert!(!token_in("secret", &tokens));
+        assert!(!token_in("", &tokens));
+    }
+
+    #[test]
+    fn empty_token_set_matches_nothing() {
+        assert!(!token_in("anything", &[]));
+        assert!(!token_in("", &[]));
     }
 }

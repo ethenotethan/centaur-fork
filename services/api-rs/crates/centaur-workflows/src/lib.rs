@@ -1399,6 +1399,16 @@ async fn discover_python_workflow_metadata() -> Result<PythonWorkflowMetadata, W
         match message.get("type").and_then(Value::as_str) {
             Some("workflow.discovery") => {
                 let _ = child.wait().await;
+                // Per-file load failures don't fail discovery — the host skips
+                // the file and reports it on stderr. Left invisible, a broken
+                // import chain silently drops workflows until the reaper
+                // cancels their schedules (2026-07-08: a module-level `import
+                // httpx` under the container's bare python3 killed 5 schedules
+                // with zero log signal). Surface them loudly.
+                let stderr = stderr_task.await.unwrap_or_default();
+                for line in stderr.lines().filter(|l| l.contains("workflow_load_error")) {
+                    warn!(detail = %line, "python workflow file failed to load during discovery");
+                }
                 let payload: PythonWorkflowDiscoveryPayload = serde_json::from_value(message)?;
                 let mut metadata = metadata_from_discovery_payload(payload);
                 WorkflowEnablement::from_env()?.filter_metadata(&mut metadata);
@@ -1961,7 +1971,11 @@ async fn run_schedule_tick(
         .await?;
     let next_run_at = next_schedule_time_after_tick(&schedule, input.scheduled_at, Utc::now())
         .map_err(absurd_error)?;
-    spawn_schedule_tick(&schedule_client, &schedule, next_run_at)
+    // Deduping here is fine (created=false ⇒ a live successor tick already
+    // exists — e.g. this tick retried after its successor spawn succeeded);
+    // the reconciler's ensure_schedule_tick handles the cancelled-tick
+    // collision case.
+    let _ = spawn_schedule_tick(&schedule_client, &schedule, next_run_at)
         .await
         .map_err(absurd_error)?;
     Ok(json!({
@@ -1984,8 +1998,33 @@ async fn ensure_schedule_tick(
     if has_active_schedule_tick(client, &schedule.schedule_id).await? {
         return Ok(false);
     }
-    spawn_schedule_tick(client, schedule, scheduled_at).await?;
-    Ok(true)
+    // spawn dedupes on the deterministic idempotency key REGARDLESS of the
+    // existing task's state. If a prior tick for this exact fire time was
+    // cancelled (e.g. by the removed-workflow reaper during a transient
+    // discovery miss), the spawn silently no-ops (created=false) while
+    // has_active_schedule_tick keeps returning false — the schedule is
+    // permanently dead even though every reconcile pass "re-seeds" it. Detect
+    // the collision and re-spawn with a nudged fire time (fresh key).
+    if spawn_schedule_tick(client, schedule, scheduled_at).await? {
+        return Ok(true);
+    }
+    let nudged = scheduled_at + chrono::Duration::seconds(1);
+    warn!(
+        schedule_id = %schedule.schedule_id,
+        scheduled_at = %scheduled_at.to_rfc3339(),
+        "schedule tick spawn deduped against a terminal task (cancelled tick \
+         holds the idempotency key); re-spawning with nudged fire time"
+    );
+    if spawn_schedule_tick(client, schedule, nudged).await? {
+        return Ok(true);
+    }
+    Err(WorkflowRuntimeError::Internal(format!(
+        "schedule {} could not be re-seeded: idempotency keys for {} and {} both \
+         collide with terminal tasks",
+        schedule.schedule_id,
+        scheduled_at.to_rfc3339(),
+        nudged.to_rfc3339(),
+    )))
 }
 
 async fn has_active_schedule_tick(
@@ -2010,12 +2049,15 @@ async fn has_active_schedule_tick(
     Ok(row.is_some())
 }
 
+/// Spawn the tick task. Returns whether a NEW task was created — `false`
+/// means the idempotency key deduped against an existing task (possibly a
+/// terminal/cancelled one; see ensure_schedule_tick).
 async fn spawn_schedule_tick(
     client: &Client,
     schedule: &RegisteredWorkflowSchedule,
     scheduled_at: DateTime<Utc>,
-) -> Result<(), WorkflowRuntimeError> {
-    client
+) -> Result<bool, WorkflowRuntimeError> {
+    let spawn = client
         .spawn(
             WORKFLOW_SCHEDULE_TASK,
             ScheduleTickInput {
@@ -2039,7 +2081,7 @@ async fn spawn_schedule_tick(
             },
         )
         .await?;
-    Ok(())
+    Ok(spawn.created)
 }
 
 fn next_schedule_time_after_tick(

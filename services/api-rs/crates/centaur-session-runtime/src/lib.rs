@@ -908,6 +908,12 @@ impl SessionRuntime {
             .and_then(|personas| personas.default_persona_id_for_access(&capabilities.repo_cache))
     }
 
+    /// FORK: expose the session store (build_router_with_session_runtime
+    /// derives its PgPool from it).
+    pub fn store(&self) -> &PgSessionStore {
+        &self.store
+    }
+
     fn context(&self) -> RuntimeContext {
         RuntimeContext {
             store: self.store.clone(),

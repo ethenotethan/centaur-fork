@@ -5,6 +5,36 @@ HOME_DIR="$(eval echo ~)"
 FIREWALL_HOSTNAME="${FIREWALL_HOST:-firewall}"
 STATE_DIR="${CENTAUR_STATE_DIR:-$HOME_DIR/state}"
 
+# DARKBLOOM PATCH: wait for iron-proxy's tunnel port to accept TCP before any
+# user code runs. The proxy pod and the sandbox pod are spawned in parallel by
+# api-rs, and the sandbox container can hit its first outbound call before the
+# proxy's listeners (:8080 tunnel, :53 DNS) are accepting. Symptom: the very
+# first slack_sdk / google-api / anthropic call fails with
+# `ConnectionRefusedError: [Errno 111] Connection refused`, which slack_sdk
+# wraps as `Slack API error: unknown_error` — and then asyncio gets stuck for
+# 300+ seconds because the executor thread can't join cleanly. The workflow
+# host marks the absurd task `failed` only after the executor finally exits,
+# leaving the task `running` and the slack_live queue (concurrency=1) blocked
+# for hours.
+#
+# Sleep-and-poll with a hard cap so a real misconfiguration doesn't deadlock
+# startup. 15s is plenty: iron-proxy's tunnel listener was up ~74ms after
+# `starting in managed mode` in our deployment, so a single sleep would be
+# enough in practice; the loop covers the cold-start case where the proxy is
+# still loading config from iron-control.
+if [ -n "${FIREWALL_HOST:-}" ] && [ "${FIREWALL_HOST}" != "firewall" ]; then
+    for i in $(seq 1 30); do
+        if timeout 1 bash -c "</dev/tcp/${FIREWALL_HOST}/${FIREWALL_PROXY_PORT:-8080}" 2>/dev/null; then
+            break
+        fi
+        if [ "$i" -eq 30 ]; then
+            echo "WARN: iron-proxy ${FIREWALL_HOST}:${FIREWALL_PROXY_PORT:-8080} not accepting after 15s; continuing anyway" >&2
+            break
+        fi
+        sleep 0.5
+    done
+fi
+
 append_tool_dirs() {
     if [ -z "${1:-}" ]; then
         return
@@ -73,16 +103,45 @@ EOF
 # ── Mock Google ADC for sandbox-only SDK initialization ─────────────────────
 # Some Google client libraries refuse to initialize without ADC, even when the
 # per-sandbox proxy is responsible for attaching the real auth headers.
+#
+# DARKBLOOM PATCH: if GOOGLE_SA_KEY is present in the env (our deployment ships
+# the real SA JSON inline as an env var), materialize it as the ADC file instead
+# of generating a mock. Without this the Drive/Calendar ETL workflows make
+# unauthenticated calls and Google rejects with 403 "unregistered callers"
+# because iron-proxy doesn't have a Google-SA-to-Bearer transform — only a
+# query-param GOOGLE_API_KEY injection that Drive doesn't accept.
+#
+# Also add googleapis.com hosts to NO_PROXY so the workflow's google-api-python
+# client talks directly to Google with its own OAuth flow, bypassing iron-proxy.
+# This mirrors the bypass the old Python stack had in k8s/centaur/values.yaml
+# (no_proxy="…oauth2.googleapis.com,www.googleapis.com,docs.googleapis.com")
+# that was dropped during the Rust cutover.
 if [ -z "${GOOGLE_APPLICATION_CREDENTIALS:-}" ]; then
     GOOGLE_APPLICATION_CREDENTIALS="$HOME_DIR/.config/gcloud/application_default_credentials.json"
     export GOOGLE_APPLICATION_CREDENTIALS
     mkdir -p "$(dirname "$GOOGLE_APPLICATION_CREDENTIALS")"
     if [ ! -f "$GOOGLE_APPLICATION_CREDENTIALS" ]; then
-        # Some SDKs parse ADC into service-account credentials locally before any
-        # outbound request reaches the proxy, so the stub must look real enough
-        # to pass key loading.
-        _mock_gcp_private_key="$(openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 2>/dev/null)"
-        MOCK_GCP_PRIVATE_KEY="$_mock_gcp_private_key" python3 - "$GOOGLE_APPLICATION_CREDENTIALS" <<'PYEOF'
+        if [ -n "${GOOGLE_SA_KEY:-}" ]; then
+            # Use python to write the env var → file, since bash heredoc would
+            # mangle the embedded newlines inside the SA's private_key field.
+            python3 - "$GOOGLE_APPLICATION_CREDENTIALS" <<'PYEOF'
+import json, os, sys
+path = sys.argv[1]
+raw = os.environ["GOOGLE_SA_KEY"]
+parsed = json.loads(raw)  # validates shape; fails loudly if env is malformed
+with open(path, "w") as f:
+    json.dump(parsed, f, indent=2)
+    f.write("\n")
+os.chmod(path, 0o600)
+PYEOF
+            export NO_PROXY="${NO_PROXY:+${NO_PROXY},}oauth2.googleapis.com,www.googleapis.com,docs.googleapis.com,drive.googleapis.com,sheets.googleapis.com,calendar-json.googleapis.com"
+            export no_proxy="${NO_PROXY}"
+        else
+            # Some SDKs parse ADC into service-account credentials locally before any
+            # outbound request reaches the proxy, so the stub must look real enough
+            # to pass key loading.
+            _mock_gcp_private_key="$(openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 2>/dev/null)"
+            MOCK_GCP_PRIVATE_KEY="$_mock_gcp_private_key" python3 - "$GOOGLE_APPLICATION_CREDENTIALS" <<'PYEOF'
 import json
 import os
 import sys
@@ -110,7 +169,8 @@ with open(path, "w") as f:
     )
     f.write("\n")
 PYEOF
-        unset _mock_gcp_private_key
+            unset _mock_gcp_private_key
+        fi
     fi
 fi
 
@@ -493,6 +553,22 @@ touch "$HOME_DIR/.ready"
         printf 'https://oauth2:%s@github.com\n' "$GITHUB_TOKEN" > "$HOME_DIR/.git-credentials"
         echo "${GITHUB_TOKEN}" | gh auth login --with-token 2>/dev/null || true
         gh auth setup-git 2>/dev/null || true
+    fi
+    # SSH commit signing: write the (base64-encoded) signing key and configure
+    # git to sign commits as the verified committer identity, so commits pass
+    # repos with a "require signed commits" ruleset. The GIT_SSH_SIGNING_KEY_B64 /
+    # GIT_SIGNING_EMAIL / GIT_SIGNING_NAME env vars are forwarded into the sandbox
+    # via SESSION_SANDBOX_PASSTHROUGH_ENV on the api-rs deployment.
+    if [ -n "${GIT_SSH_SIGNING_KEY_B64:-}" ]; then
+        mkdir -p "$HOME_DIR/.ssh" && chmod 700 "$HOME_DIR/.ssh"
+        printf '%s' "$GIT_SSH_SIGNING_KEY_B64" | base64 -d > "$HOME_DIR/.ssh/centaur_signing" 2>/dev/null
+        chmod 600 "$HOME_DIR/.ssh/centaur_signing"
+        git config --global gpg.format ssh
+        git config --global user.signingkey "$HOME_DIR/.ssh/centaur_signing"
+        git config --global commit.gpgsign true
+        git config --global tag.gpgsign true
+        git config --global user.name "${GIT_SIGNING_NAME:-shwniscool}"
+        git config --global user.email "${GIT_SIGNING_EMAIL:-shwniscool@gmail.com}"
     fi
 } &
 

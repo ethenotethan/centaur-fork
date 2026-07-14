@@ -1,0 +1,93 @@
+title: "Darkbloom Centaur Fork"
+logo: ""
+footer: |
+  [paradigmxyz/centaur](https://github.com/paradigmxyz/centaur) fork overview &middot; maintained by Darkbloom &middot; created with [Forkdiff](https://github.com/protolambda/forkdiff)
+base:
+  name: paradigmxyz/centaur
+  url: https://github.com/paradigmxyz/centaur
+  ref: refs/heads/main
+fork:
+  name: ethenotethan/centaur-fork
+  url: https://github.com/ethenotethan/centaur-fork
+  ref: refs/heads/migrate/rust-stack
+def:
+  title: "Darkbloom Fork Diff"
+  description: |
+    Darkbloom's fork of [paradigmxyz/centaur](https://github.com/paradigmxyz/centaur)
+    on the `migrate/rust-stack` branch. These patches add the Rust wiki API,
+    sandbox SSH commit signing, Google Drive SA-key auth, and deployment DB overrides.
+  globs:
+    - "services/api-rs/**"
+    - "services/sandbox/**"
+    - "tools/productivity/company_context/**"
+    - "workflows/**"
+  sub:
+    - title: "Wiki API (Rust)"
+      description: |
+        Read-only wiki endpoints ported to the Rust API server (`centaur-api-server/src/wiki.rs`).
+        Serves the docs-site SPA with live graph, page, search, changes, timeline, and diff views
+        from `company_context_documents` + `wiki_page_revisions` + `wiki_ingested_sources`.
+        Includes `goal_kind` taxonomy support and ParadeDB BM25 full-text search.
+      globs:
+        - "services/api-rs/crates/centaur-api-server/src/wiki.rs"
+    - title: "Wiki Migrations"
+      description: |
+        New SQL migrations creating the `wiki_page_revisions` append-only history table
+        and `wiki_ingested_sources` event-time + title + URL columns for the cross-stream
+        timeline view.
+      globs:
+        - "services/api-rs/crates/centaur-session-sqlx/migrations/0024_wiki_revisions.sql"
+        - "services/api-rs/crates/centaur-session-sqlx/migrations/0025_wiki_timeline_event_meta.sql"
+    - title: "Sandbox SSH Commit Signing"
+      description: |
+        The sandbox `entrypoint.sh` decodes `GIT_SSH_SIGNING_KEY_B64` and configures git SSH
+        commit signing (`gpg.format=ssh`, `commit.gpgsign=true`) so sandbox commits pass repos
+        with a "require signed commits" ruleset. The `Dockerfile` adds `openssh-client` for the
+        `ssh-keygen` binary used in signing.
+      globs:
+        - "services/sandbox/Dockerfile"
+        - "services/sandbox/entrypoint.sh"
+    - title: "Google Drive/Calendar SA-Key Auth + Proxy Bypass"
+      description: |
+        Two patches that together fix Drive/Calendar ETL in the sandbox:
+        1. `entrypoint.sh`: when `GOOGLE_SA_KEY` is present, materializes the **real** SA JSON
+           to `$GOOGLE_APPLICATION_CREDENTIALS` (instead of the upstream mock) and adds
+           `*.googleapis.com` to `NO_PROXY`.
+        2. `workflows/gsuite/`: `build_credentials()` loads real `ServiceAccountCredentials`,
+           and `build_http()` honors `NO_PROXY` (httplib2 doesn't natively). Drive/Calendar/Docs
+           pass `credentials=` to `discovery.build()` with direct transport (no proxy).
+      globs:
+        - "workflows/gsuite/http.py"
+        - "workflows/gsuite/drive.py"
+        - "workflows/gsuite/calendar.py"
+        - "workflows/gsuite/docs.py"
+    - title: "API Server Wiring"
+      description: |
+        Minor Rust-side wiring to register the wiki module: `wiki.rs` added to `lib.rs`,
+        `wiki` router mounted in `routes.rs`, `AppState::runtime()` made pub(crate),
+        Cargo deps for `time` crate, and error variant for SQL errors in wiki handlers.
+      globs:
+        - "services/api-rs/crates/centaur-api-server/src/lib.rs"
+        - "services/api-rs/crates/centaur-api-server/src/main.rs"
+        - "services/api-rs/crates/centaur-api-server/src/routes.rs"
+        - "services/api-rs/crates/centaur-api-server/src/error.rs"
+        - "services/api-rs/crates/centaur-api-server/Cargo.toml"
+        - "services/api-rs/Cargo.toml"
+        - "services/api-rs/crates/centaur-session-runtime/src/lib.rs"
+    - title: "Company Context DB Override"
+      description: |
+        Sets `database = "ai_v2"` in the company_context tool's `pyproject.toml` — our
+        deployment DB name (upstream defaults to `"centaur"`). Without this, iron-control's
+        `pg_dsn_secrets` registration 422s on the Rails uniqueness check.
+      globs:
+        - "tools/productivity/company_context/pyproject.toml"
+    - title: "Workflow Host Patches"
+      description: |
+        Minor fixes to the Python workflow host: `company_context_documents` workflow
+        uses `WIKI_WRITE_SOURCE`-aware table names, and the gsuite workflows use the
+        real SA credentials path.
+      globs:
+        - "workflows/company_context_documents.py"
+ignore:
+  - "*.lock"
+  - "Cargo.lock"

@@ -193,11 +193,11 @@ mod tests {
             PgPool::connect_lazy("postgres://postgres:postgres@localhost/centaur_test").unwrap();
         state.mark_ready(
             centaur_session_runtime::SessionRuntime::new(
-                PgSessionStore::new(pool),
+                PgSessionStore::new(pool.clone()),
                 SandboxRuntime::backend(Arc::new(TestBackend::default()), SandboxSpec::new("test")),
             ),
             None,
-            None,
+            Some(pool),
         );
         let app = build_router_with_app_state(state);
 

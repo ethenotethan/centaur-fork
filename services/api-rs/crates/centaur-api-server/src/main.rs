@@ -73,7 +73,6 @@ async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), Serve
         let worker = activity_summary::ActivitySummaryWorker::new(store.clone(), config)?;
         tokio::spawn(worker.run());
     }
-    let pool = store.pool().clone();
     let sandbox_runtime = args.sandbox_runtime().await?;
     let mut runtime = SessionRuntime::new(store.clone(), sandbox_runtime)
         .with_openai_session_title_generator_from_env();
@@ -99,6 +98,7 @@ async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), Serve
     let workflow_host_sandbox = args
         .workflow_host_sandbox_runtime(workflow_host_principal.as_deref())
         .await?;
+    let pool = store.pool().clone();
     let workflows = Some(
         WorkflowRuntime::new_with_workflow_host_sandbox(
             store,

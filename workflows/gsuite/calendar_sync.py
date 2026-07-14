@@ -22,6 +22,21 @@ DEFAULT_SYNC_INTERVAL_SECONDS = 4 * 60 * 60
 DEFAULT_PAGE_SIZE = 250
 
 
+# Calendars the scheduled sync targets. The recurring run passes no input, so
+# without this it falls back to "all_visible" — which enumerates the SA's
+# CalendarList (calendarList.list). A bare service account's CalendarList is
+# EMPTY (nothing added, and calendar.readonly can't calendarList.insert), so
+# discovery finds 0 calendars even when meeting invites are shared TO the SA:
+# a shared invite lands on the SA's OWN primary calendar as a guest, which
+# calendarList.list does not surface but list_events(calendar_id="primary")
+# does. So we pin the scheduled sync to explicit calendar IDs (default the SA's
+# own "primary"), which bypasses discovery and reads events directly. Override
+# with a comma-separated GOOGLE_CALENDAR_IDS if meetings live on other shared
+# calendars (use each calendar's ID / organizer email).
+_SCHEDULED_CALENDAR_IDS = [
+    c.strip() for c in (os.getenv("GOOGLE_CALENDAR_IDS") or "primary").split(",") if c.strip()
+]
+
 SCHEDULE = {
     "schedule_id": "google_calendar_sync",
     "interval_seconds": positive_int(
@@ -30,6 +45,7 @@ SCHEDULE = {
     ),
     "enabled": env_flag_enabled("GOOGLE_CALENDAR_ETL_ENABLED", default=False),
     "no_delivery": True,
+    "input": {"calendar_ids": _SCHEDULED_CALENDAR_IDS},
 }
 
 

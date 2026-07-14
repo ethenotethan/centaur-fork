@@ -112,7 +112,9 @@ def current_session_context() -> dict[str, Any]:
     thread_key = current_thread_key()
     base_url = secret("CENTAUR_API_URL", "http://api:8000").rstrip("/")
     headers: dict[str, str] = {}
-    api_key = secret("CENTAUR_API_KEY", "").strip()
+    # SLACKBOT_API_KEY fallback: sandbox pods carry that name (envFrom
+    # centaur-infra-env); api-rs accepts either token for /api/session auth.
+    api_key = (secret("CENTAUR_API_KEY", "") or secret("SLACKBOT_API_KEY", "")).strip()
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     request = urllib.request.Request(

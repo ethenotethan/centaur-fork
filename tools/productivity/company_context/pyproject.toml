@@ -26,11 +26,14 @@ packages = ["."]
 [tool.centaur]
 module = "client.py"
 
+# Upstream secret shape, with the two DARKBLOOM overrides preserved from the
+# fork: our deployment's database is ai_v2 (not `centaur`) and the DSN lives
+# in DATABASE_URL (not CENTAUR_POSTGRES_DSN).
 [[tool.centaur.secrets]]
 type = "pg_dsn"
 name = "company_context_dsn"
-database = "centaur"
-secret_ref = "CENTAUR_POSTGRES_DSN"
+database = "ai_v2"
+secret_ref = "DATABASE_URL"
 role = "centaur_slack_reader"
 settings = [
     { name = "centaur.slack_channel_id", value_from = { principal_label = "slack_channel_id" } },

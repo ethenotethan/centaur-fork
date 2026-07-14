@@ -1181,8 +1181,22 @@ class SlackEtlClient:
             if include_private_channels is None
             else include_private_channels
         )
+
+        # FORK: private-channel allowlist. SLACK_ETL_PRIVATE_CHANNEL_IDS
+        # (comma-separated channel IDs) opts SPECIFIC private channels into the
+        # ETL without the all-or-nothing SLACK_SYNC_INDEX_PRIVATE_CHANNELS
+        # flag. Composition: the upstream flag admits all private channels; the
+        # allowlist admits just the listed ones; either grants inclusion. The
+        # ETL user token must be a member of allowlisted channels.
+        private_allow = {
+            c.strip()
+            for c in (os.getenv("SLACK_ETL_PRIVATE_CHANNEL_IDS") or "").split(",")
+            if c.strip()
+        }
         conversation_types = (
-            "public_channel,private_channel" if include_private else "public_channel"
+            "public_channel,private_channel"
+            if include_private or private_allow
+            else "public_channel"
         )
 
         while len(channels) < limit:
@@ -1205,7 +1219,7 @@ class SlackEtlClient:
 
             for channel in response.get("channels", []):
                 is_private = bool(channel.get("is_private", False))
-                if is_private and not include_private:
+                if is_private and not include_private and channel.get("id", "") not in private_allow:
                     continue
                 channels.append(
                     {
